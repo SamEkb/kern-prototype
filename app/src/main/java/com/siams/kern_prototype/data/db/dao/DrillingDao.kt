@@ -38,6 +38,13 @@ interface DrillingDao {
     @Query("SELECT * FROM drilling WHERE id = :id")
     suspend fun getWithContent(id: String): DrillingWithContent?
 
+    /** ERROR только если долбление всё ещё в SENDING. @return 1 — статус изменён. */
+    @Query("UPDATE drilling SET syncStatus = 'ERROR', lastError = :error WHERE id = :id AND syncStatus = 'SENDING'")
+    suspend fun failIfSending(id: String, error: String): Int
+
+    @Query("SELECT id FROM drilling WHERE syncStatus = :status")
+    suspend fun listIdsByStatus(status: SyncStatus): List<String>
+
     @Query("UPDATE drilling SET syncStatus = :status, lastError = :error WHERE id = :id")
     suspend fun setSyncStatus(id: String, status: SyncStatus, error: String?)
 
@@ -87,8 +94,29 @@ interface DrillingDao {
     )
     suspend fun countUndeliveredLayers(id: String): Int
 
-    @Query("UPDATE drilling SET remoteId = :remoteId WHERE id = :id")
-    suspend fun setRemoteId(id: String, remoteId: String)
+    /** R03: проект создан/найден в назначении [destination] — удалённые id относятся к нему. */
+    @Query("UPDATE drilling SET remoteId = :remoteId, remoteDestination = :destination WHERE id = :id")
+    suspend fun setRemoteSource(id: String, remoteId: String, destination: String)
+
+    /**
+     * R03: оператор подтвердил исходный сервер записи до v5 (назначение было неизвестно).
+     * @return 1 — подтверждено; 0 — подтверждать нечего (не отправлялось или уже известно).
+     */
+    @Query(
+        """UPDATE drilling SET remoteDestination = :destination
+           WHERE id = :id AND remoteId IS NOT NULL AND remoteDestination IS NULL""",
+    )
+    suspend fun confirmRemoteDestination(id: String, destination: String): Int
+
+    /** R03: удалённое состояние долбления недействительно (другой сервер/проект удалён). */
+    @Query("UPDATE drilling SET remoteId = NULL, remoteDestination = NULL WHERE id = :id")
+    suspend fun clearRemoteSource(id: String)
+
+    @Query(
+        """UPDATE layer SET remoteImageId = NULL, metaConfirmed = 0, staleRemoteImageId = NULL
+           WHERE tableId IN (SELECT id FROM core_table WHERE drillingId = :id)""",
+    )
+    suspend fun clearRemoteLayers(id: String)
 
     @Query("UPDATE drilling SET uploadedTables = :uploaded, totalTables = :total WHERE id = :id")
     suspend fun setUploadProgress(id: String, uploaded: Int, total: Int)

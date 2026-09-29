@@ -24,4 +24,15 @@ data class ServerSettings(
      * POST form `username`/`password` → cookie `JSESSIONID`.
      */
     fun loginUrl(): String = "${scheme()}://$host:$port/s8/sia/auth/login"
+
+    /** Назначение отправки (R03): сервер + учётная запись, без пароля. */
+    fun destination(): S900Destination = S900Destination(scheme(), host.trim().lowercase(), port, login.trim())
+}
+
+/**
+ * Назначение отправки (R03). Удалённые id (проект, изображения) действительны только в своём
+ * назначении; отправка закрепляет его на всю задачу. [key] хранится вместе с долблением.
+ */
+data class S900Destination(val scheme: String, val host: String, val port: Int, val login: String) {
+    val key: String get() = "$scheme://$host:$port|$login"
 }

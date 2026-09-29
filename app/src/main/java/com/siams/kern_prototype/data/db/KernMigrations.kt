@@ -31,5 +31,18 @@ object KernMigrations {
         }
     }
 
-    val ALL: Array<Migration> = arrayOf(MIGRATION_3_4)
+    /**
+     * v4 → v5 (R03, R02): `drilling.remoteDestination` и `layer.fileSha256` (NULL у прежних
+     * снимков — они проверяются полным декодированием). Для уже отправленных долблений назначение
+     * неизвестно (NULL): при следующей отправке принимается текущее (прежнее поведение), дальше
+     * смена сервера распознаётся.
+     */
+    val MIGRATION_4_5 = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE drilling ADD COLUMN remoteDestination TEXT")
+            db.execSQL("ALTER TABLE layer ADD COLUMN fileSha256 TEXT")
+        }
+    }
+
+    val ALL: Array<Migration> = arrayOf(MIGRATION_3_4, MIGRATION_4_5)
 }

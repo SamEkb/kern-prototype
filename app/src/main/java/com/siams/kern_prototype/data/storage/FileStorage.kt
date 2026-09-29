@@ -3,9 +3,12 @@ package com.siams.kern_prototype.data.storage
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.os.Build
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -54,11 +57,29 @@ class FileStorage @Inject constructor(
     }.getOrDefault(false)
 
     /**
-     * R08: структурная проверка JPEG без декодирования полного кадра — маркеры начала
-     * (FF D8 FF) и конца (FF D9 в последних байтах). Ловит пустой и обрезанный файл.
+     * R02/R08: проблема JPEG-файла или null, если он цел. Критерии отклонения:
+     *  - нет файла, пустой, нет маркеров начала (FF D8 FF) и конца (FF D9 в последних байтах);
+     *  - baseline-JPEG: проверка всех блоков энтропийных данных [JpegValidator] (коды Хаффмана,
+     *    число блоков по размерам кадра, EOI сразу после последнего блока, маркеры рестарта);
+     *  - прочие JPEG (прогрессивный и т.п.): декодер Android — неполное/повреждённое изображение
+     *    (API 28+: [ImageDecoder.OnPartialImageListener]) или отказ декодирования.
+     * Порчу, после которой данные остаются формально корректными, ловит только сверка [sha256] с
+     * суммой, записанной при съёмке (так проверяются все снимки v5+ перед отправкой).
      */
-    fun isCompleteJpeg(file: File): Boolean = runCatching {
-        if (!file.isFile || file.length() < 8) return false
+    fun jpegProblem(file: File): String? {
+        if (!file.isFile) return "файл снимка отсутствует"
+        if (file.length() == 0L) return "файл снимка пуст"
+        if (!hasJpegMarkers(file)) return "файл снимка повреждён"
+        val bytes = runCatching { file.readBytes() }.getOrElse { return "файл снимка не читается" }
+        return when (val r = JpegValidator.check(bytes)) {
+            JpegValidator.Result.Ok -> null
+            is JpegValidator.Result.Corrupt -> "файл снимка повреждён (${r.reason})"
+            JpegValidator.Result.Unsupported -> if (decodes(file)) null else "файл снимка повреждён"
+        }
+    }
+
+    private fun hasJpegMarkers(file: File): Boolean = runCatching {
+        if (file.length() < 8) return false
         java.io.RandomAccessFile(file, "r").use { f ->
             val head = ByteArray(3).also { f.readFully(it) }
             if (head[0] != 0xFF.toByte() || head[1] != 0xD8.toByte() || head[2] != 0xFF.toByte()) return false
@@ -69,6 +90,36 @@ class FileStorage @Inject constructor(
             (tailLen - 2 downTo 0).any { tail[it] == 0xFF.toByte() && tail[it + 1] == 0xD9.toByte() }
         }
     }.getOrDefault(false)
+
+    private fun decodes(file: File): Boolean = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val bmp = ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
+                val side = maxOf(info.size.width, info.size.height)
+                decoder.setTargetSampleSize(maxOf(1, Integer.highestOneBit(maxOf(1, side / VERIFY_MAX_SIDE))))
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                decoder.setOnPartialImageListener { false } // неполное/повреждённое — ошибка
+            }
+            bmp.recycle()
+            true
+        } else {
+            val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
+            BitmapFactory.decodeFile(file.absolutePath, opts)?.also { it.recycle() } != null
+        }
+    }.getOrDefault(false)
+
+    /** SHA-256 файла (hex). */
+    fun sha256(file: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
 
     /**
      * Удалить файл. Ошибка удаления не бросается (запись в БД уже удалена/переключена —
@@ -91,6 +142,7 @@ class FileStorage @Inject constructor(
 
     private companion object {
         const val TAG = "FileStorage"
+        const val VERIFY_MAX_SIDE = 1024
     }
 
     /** Суммарный занятый объём в байтах (индикация места, §11). */

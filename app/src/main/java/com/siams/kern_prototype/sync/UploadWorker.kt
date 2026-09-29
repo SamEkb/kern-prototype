@@ -8,6 +8,7 @@ import com.siams.kern_prototype.data.KernRepository
 import com.siams.kern_prototype.domain.model.SyncStatus
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlinx.coroutines.CancellationException
 
 /**
  * Фоновая задача отправки одного долбления (§9). Экспоненциальные ретраи —
@@ -26,6 +27,14 @@ class UploadWorker @AssistedInject constructor(
         return try {
             uploader.upload(drillingId)
             Result.success()
+        } catch (e: CancellationException) {
+            // Остановка задачи (система, ограничения) — не ошибка отправки: статус не трогаем,
+            // WorkManager перезапустит задачу; незавершённость отсечёт условный SENT.
+            throw e
+        } catch (e: UploadRejectedException) {
+            // Повтор не поможет (повреждён архив, расхождение с сервером) — сразу ERROR.
+            repository.setSyncStatus(drillingId, SyncStatus.ERROR, e.message)
+            Result.failure()
         } catch (t: Throwable) {
             val giveUp = runAttemptCount + 1 >= MAX_ATTEMPTS
             repository.setSyncStatus(

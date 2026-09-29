@@ -52,8 +52,21 @@ DataStore · Retrofit/OkHttp (kotlinx.serialization) · WorkManager · Hilt · C
   (`network_security_config`). Из эмулятора хост = **`10.0.2.2`** (не `localhost`).
 - **Авторизация — СЕССИОННАЯ, не Basic** (проверено на живом s900, резолв §10.3):
   форма `POST /s8/sia/auth/login` (form `username`/`password`) → cookie `JSESSIONID`.
-  Реализация: `InMemoryCookieJar` + `SessionLoginInterceptor` (на 302→`/sia/auth/`
-  логинится и повторяет запрос). Клиент с `followRedirects=false`.
+  Реализация: `InMemoryCookieJar` + `SessionLoginInterceptor` (вход заранее; на 302→`/sia/auth/`,
+  401, 403 — один повторный вход и один повтор запроса; сбой входа — ошибка, не аноним).
+  Клиент с `followRedirects=false`. Сессия сбрасывается при смене сервера/учётки/пароля.
+  «Проверить соединение» подтверждает только доступность: критерий успешного входа не согласован (Q10).
+- **Назначение (R03)**: каждый вызов `S900Api` несёт `@Tag S900Destination` (сервер+логин);
+  смена настроек посреди отправки обрывает её. `drilling.remoteDestination` — где действительны
+  удалённые id; другой сервер → сверка (404 → полный экспорт, проект есть → отказ), 404 на PUT →
+  полный экспорт; записи до v5 (назначение неизвестно) — отказ до явного подтверждения сервера
+  оператором. Каждый сохранённый кадр стола сверяется с проектом (есть, один FoV).
+  Неустранимые ошибки — `UploadRejectedException` (сразу ERROR, без ретраев).
+- **Сессии** изолированы по назначению+паролю: cookie ведёт `SessionLoginInterceptor` (у клиентов
+  CookieJar нет). Вход успешен только при 2xx/3xx.
+- **Целостность снимков**: SHA-256 при съёмке (`layer.fileSha256`) сверяется перед отправкой; снимки
+  до v5 — `JpegValidator` (baseline-JPEG, все блоки). Постановка в отправку и сверка «зависших»
+  SENDING — под общим замком `SyncManager`.
 - Последовательность отправки стола — `DrillingUploader.uploadTable` (§8.3):
   create source (идемпотентно по id) → залить Дневной (новый FoV) → PUT метаданные
   (`lampType`/`stackUid`/`coreImageType`) → залить УФ в тот же FoV → PUT метаданные.
@@ -123,7 +136,7 @@ DataStore · Retrofit/OkHttp (kotlinx.serialization) · WorkManager · Hilt · C
   `ndkVersion=28.2.13676358`, `abiFilters=arm64-v8a,armeabi-v7a`. Собрано и упаковано:
   APK содержит `libtoupcam.so`+`libjnicam.so` под обе ABI.
 - **Дизайн §14**: иконки → Material Symbols Outlined; строки вынесены в `strings.xml`
-  (RU). БД: version=4, явные миграции (`KernMigrations`, схемы в `app/schemas`, тесты `KernMigrationsTest`), копия БД перед обновлением (`DatabaseBackup`); разрушительного fallback нет (v1–v2 и сбой копии останавливают обновление).
+  (RU). БД: version=5, явные миграции (`KernMigrations`, схемы в `app/schemas`, тесты `KernMigrationsTest`), копия БД перед обновлением (`DatabaseBackup`); разрушительного fallback нет (v1–v2 и сбой копии останавливают обновление).
 
 **Заблокировано / остаётся вручную:**
 - Динамическая загрузка полей паспорта с сервера — ждёт REST-эндпоинт §10.1 (сейчас

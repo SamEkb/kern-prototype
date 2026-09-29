@@ -25,4 +25,9 @@ data class DrillingEntity(
      * успешной (SENT) только если ревизия не изменилась с момента её начала.
      */
     @ColumnInfo(defaultValue = "0") val editRevision: Long = 0,
+    /**
+     * R03: назначение ([com.siams.kern_prototype.domain.model.S900Destination.key]), в котором
+     * действительны [remoteId] и remoteImageId слоёв. null при заданном remoteId — запись до v5.
+     */
+    val remoteDestination: String? = null,
 )

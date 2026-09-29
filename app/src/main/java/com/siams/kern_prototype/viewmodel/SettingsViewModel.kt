@@ -60,14 +60,24 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             _test.value = TestState.Testing
             when (val r = tester.test(settings)) {
-                is ConnectionResult.Success -> {
-                    _test.value = TestState.Success("Соединение успешно (HTTP ${r.httpCode}).")
+                is ConnectionResult.Reachable -> {
+                    // R12: доступность ≠ авторизация; положительный критерий входа не согласован (Q10).
+                    _test.value = TestState.Success(
+                        "Сервер доступен (HTTP ${r.httpCode}), вход не отклонён. Права учётной записи " +
+                            "этой проверкой не подтверждаются — они проверяются при первой отправке.",
+                    )
                     // §5.1: сохранить и авто-загрузить конфигурацию полей (встроенная схема, §10.1).
                     store.save(settings)
                     store.setFieldsLoadedAt(System.currentTimeMillis())
                 }
-                ConnectionResult.AuthFailed ->
-                    _test.value = TestState.Failure("Не удалось авторизоваться. Проверьте логин/пароль s900.")
+                is ConnectionResult.AuthFailed ->
+                    _test.value = TestState.Failure(
+                        "Не удалось авторизоваться${r.httpCode?.let { " (HTTP $it)" }.orEmpty()}. Проверьте логин/пароль s900.",
+                    )
+                is ConnectionResult.LoginFailed ->
+                    _test.value = TestState.Failure(
+                        "Вход не выполнен (HTTP ${r.httpCode}). Проверьте адрес сервера, порт и учётные данные.",
+                    )
                 is ConnectionResult.ServerError ->
                     _test.value = TestState.Failure("Ошибка сервера (HTTP ${r.httpCode}).")
                 is ConnectionResult.Unreachable ->

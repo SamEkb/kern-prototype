@@ -3,7 +3,12 @@ package com.siams.kern_prototype
 import android.app.Application
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
+import com.siams.kern_prototype.sync.SyncManager
 import dagger.hilt.android.HiltAndroidApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -15,6 +20,16 @@ import javax.inject.Inject
 class KernApplication : Application(), Configuration.Provider {
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
+    @Inject lateinit var syncManager: SyncManager
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    override fun onCreate() {
+        super.onCreate()
+        // R05: снять «зависшие» SENDING без активной задачи отправки (до действий пользователя).
+        // Согласовано с постановкой в отправку общим замком SyncManager (не «до действий пользователя»).
+        appScope.launch { runCatching { syncManager.reconcileStuck() } }
+    }
 
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()

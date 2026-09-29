@@ -7,7 +7,7 @@ import com.siams.kern_prototype.data.db.KernDatabase
 import com.siams.kern_prototype.data.storage.FileStorage
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
-import com.siams.kern_prototype.sync.DrillingUploaderTest.Companion.MINIMAL_JPEG
+import com.siams.kern_prototype.TestJpeg
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -26,11 +26,13 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 import java.io.File
 
 /** П.4: удаление слоя/стола/долбления — сначала БД, потом файлы; неизвестный исход — файлы целы. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 class DeleteTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
@@ -48,7 +50,7 @@ class DeleteTest {
         repo = KernRepository(db, db.drillingDao(), db.tableDao(), db.layerDao(), FileStorage(context), PassportCodec(json), json)
         drillingId = repo.createDrilling("Д", emptyMap())
         val (id, f) = repo.newLayerFile(drillingId)
-        f.writeBytes(MINIMAL_JPEG)
+        f.writeBytes(TestJpeg.bytes())
         tableId = repo.saveCapture(drillingId, null, id, LampType.DAYLIGHT, f, CameraProfile.defaultFor(LampType.DAYLIGHT)).id
         layerId = db.layerDao().getByTableAndLamp(tableId, "DAYLIGHT")!!.id
         photo = f

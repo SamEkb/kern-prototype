@@ -8,7 +8,7 @@ import com.siams.kern_prototype.data.storage.FileStorage
 import com.siams.kern_prototype.data.storage.writeAtomically
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
-import com.siams.kern_prototype.sync.DrillingUploaderTest.Companion.MINIMAL_JPEG
+import com.siams.kern_prototype.TestJpeg
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -25,11 +25,13 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 import java.io.File
 
 /** R08: новый кадр фиксируется до удаления прежнего; неудачный кадр ничего не портит. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 class SaveCaptureTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
@@ -49,7 +51,7 @@ class SaveCaptureTest {
     @After
     fun tearDown() = db.close()
 
-    private fun shot(drillingId: String, bytes: ByteArray = MINIMAL_JPEG): Pair<String, File> =
+    private fun shot(drillingId: String, bytes: ByteArray = TestJpeg.bytes()): Pair<String, File> =
         repo.newLayerFile(drillingId).also { (_, f) -> f.writeBytes(bytes) }
 
     @Test
@@ -77,7 +79,7 @@ class SaveCaptureTest {
         val (id1, f1) = shot(d)
         val table = repo.saveCapture(d, null, id1, LampType.DAYLIGHT, f1, profile)
 
-        val (id2, f2) = shot(d, MINIMAL_JPEG.copyOf(5)) // обрезан: нет EOI
+        val (id2, f2) = shot(d, TestJpeg.bytes().copyOf(5)) // обрезан: нет EOI
         try { repo.saveCapture(d, table.id, id2, LampType.DAYLIGHT, f2, profile); fail() } catch (_: IllegalStateException) {}
         assertEquals(f1.absolutePath, db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT")!!.filePath)
         assertTrue(f1.exists())
@@ -153,6 +155,18 @@ class SaveCaptureTest {
     }
 
     @Test
+    fun corruptedMiddleIsRejectedAtCaptureAndShaIsRecorded() = runBlocking {
+        val d = repo.createDrilling("Д", emptyMap())
+        val (id1, f1) = shot(d, TestJpeg.corruptMiddle(TestJpeg.bytes(320, 240), "cut"))
+        try { repo.saveCapture(d, null, id1, LampType.DAYLIGHT, f1, profile); fail() } catch (_: IllegalStateException) {}
+        assertEquals(0, db.tableDao().countByDrilling(d))
+
+        val (id2, f2) = shot(d)
+        val table = repo.saveCapture(d, null, id2, LampType.DAYLIGHT, f2, profile)
+        assertEquals(FileStorage(context).sha256(f2), db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT")!!.fileSha256)
+    }
+
+    @Test
     fun atomicWriteLeavesNoPartialFile() {
         val target = File(context.filesDir, "atomic/x.jpg")
         try {
@@ -162,8 +176,8 @@ class SaveCaptureTest {
         assertFalse(target.exists())
         assertFalse(File(target.path + ".tmp").exists())
 
-        writeAtomically(target) { it.write(MINIMAL_JPEG); true }
-        assertTrue(FileStorage(context).isCompleteJpeg(target))
+        writeAtomically(target) { it.write(TestJpeg.bytes()); true }
+        assertNull(FileStorage(context).jpegProblem(target))
         assertNull(target.parentFile!!.listFiles()!!.firstOrNull { it.name.endsWith(".tmp") })
     }
 }

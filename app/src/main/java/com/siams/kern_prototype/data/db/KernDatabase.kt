@@ -26,6 +26,6 @@ abstract class KernDatabase : RoomDatabase() {
         const val NAME = "kern.db"
 
         /** При повышении — добавить миграцию в [KernMigrations.ALL] и тест в MigrationTest. */
-        const val VERSION = 4
+        const val VERSION = 5
     }
 }

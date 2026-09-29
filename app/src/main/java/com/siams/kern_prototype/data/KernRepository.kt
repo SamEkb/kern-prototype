@@ -191,8 +191,10 @@ class KernRepository @Inject constructor(
         profile: CameraProfile,
         coreImageType: CoreImageType = CoreImageType.UNKNOWN,
     ): TableEntity {
-        check(withContext(Dispatchers.IO) { fileStorage.isCompleteJpeg(file) }) {
-            "Снимок записан не полностью — повторите съёмку"
+        // R02/R08: кадр целый (полное декодирование) — и его контрольная сумма для сверки перед отправкой.
+        val sha256 = withContext(Dispatchers.IO) {
+            fileStorage.jpegProblem(file)?.let { error("Снимок записан с ошибкой ($it) — повторите съёмку") }
+            fileStorage.sha256(file)
         }
         // Миниатюра для быстрых превью (§11); при ошибке — используем оригинал.
         // Декодирование JPEG — на IO, чтобы не блокировать UI-поток (защита от ANR).
@@ -226,6 +228,7 @@ class KernRepository @Inject constructor(
                         kernLowerDepth = existing?.kernLowerDepth,
                         remoteImageId = null, // перезаливать заново
                         staleRemoteImageId = existing?.staleRemoteImageId, // прежний кадр всё ещё на сервере
+                        fileSha256 = sha256,
                     ),
                 )
                 markDrillingDirty(t.drillingId)
@@ -379,11 +382,31 @@ class KernRepository @Inject constructor(
 
     suspend fun getDrillingContent(id: String): DrillingWithContent? = drillingDao.getWithContent(id)
 
+    suspend fun listDrillingIds(status: SyncStatus): List<String> = drillingDao.listIdsByStatus(status)
+
+    /** См. [DrillingDao.failIfSending]. */
+    suspend fun failIfSending(id: String, error: String): Boolean = drillingDao.failIfSending(id, error) > 0
+
     suspend fun setSyncStatus(id: String, status: SyncStatus, error: String? = null) =
         drillingDao.setSyncStatus(id, status, error)
 
-    suspend fun setDrillingRemoteId(id: String, remoteId: String) =
-        drillingDao.setRemoteId(id, remoteId)
+    /** R03: проект есть в назначении [destination] (ключ [S900Destination.key]). */
+    suspend fun setRemoteSource(id: String, remoteId: String, destination: String) =
+        drillingDao.setRemoteSource(id, remoteId, destination)
+
+    /** R03: см. [DrillingDao.confirmRemoteDestination]. */
+    suspend fun confirmRemoteDestination(id: String, destination: String): Boolean =
+        drillingDao.confirmRemoteDestination(id, destination) > 0
+
+    /**
+     * R03: удалённое состояние долбления недействительно (сменился сервер/учётная запись или
+     * проект удалён на сервере): сбросить id проекта и всех слоёв одной транзакцией — следующая
+     * отправка выполнит полный экспорт. Не правка пользователя: ревизия не меняется.
+     */
+    suspend fun resetRemoteState(id: String) = db.withTransaction {
+        drillingDao.clearRemoteSource(id)
+        drillingDao.clearRemoteLayers(id)
+    }
 
     /** См. [DrillingDao.markSentIfComplete]. */
     suspend fun markSentIfComplete(id: String, revision: Long): Boolean =

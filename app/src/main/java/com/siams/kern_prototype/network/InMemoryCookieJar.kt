@@ -3,31 +3,34 @@ package com.siams.kern_prototype.network
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
- * Простой in-memory CookieJar (по хосту, по имени куки). Нужен для сессионной
- * авторизации s900 — хранит `JSESSIONID` между логином и запросами API (§10.3).
- * JSESSIONID — session-cookie без expiry, поэтому фильтрация по времени не нужна.
+ * In-memory хранилище cookie одной сессии s900 (§10.3): хранит `JSESSIONID` между логином и
+ * запросами API. Экземпляр — на сессию ([SessionLoginInterceptor.Session]) или на проверку соединения. R12: соблюдает правила cookie — домен/хост, путь, Secure и срок
+ * действия ([Cookie.matches], `expiresAt`); одноимённые cookie разных доменов/путей не смешиваются.
  */
-@Singleton
-class InMemoryCookieJar @Inject constructor() : CookieJar {
+class InMemoryCookieJar : CookieJar {
 
-    private val store = mutableMapOf<String, MutableMap<String, Cookie>>()
+    private val cookies = mutableListOf<Cookie>()
 
     @Synchronized
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-        val forHost = store.getOrPut(url.host) { mutableMapOf() }
-        cookies.forEach { forHost[it.name] = it }
+        for (c in cookies) {
+            this.cookies.removeAll { it.name == c.name && it.domain == c.domain && it.path == c.path }
+            if (c.expiresAt > System.currentTimeMillis()) this.cookies += c // истёкшая = удаление
+        }
     }
 
     @Synchronized
-    override fun loadForRequest(url: HttpUrl): List<Cookie> =
-        store[url.host]?.values?.toList() ?: emptyList()
+    override fun loadForRequest(url: HttpUrl): List<Cookie> {
+        val now = System.currentTimeMillis()
+        cookies.removeAll { it.expiresAt <= now }
+        return cookies.filter { it.matches(url) }
+    }
 
+    /** Сбросить все сессии (смена сервера/учётной записи, устаревшая сессия). */
     @Synchronized
-    fun clear(host: String? = null) {
-        if (host == null) store.clear() else store.remove(host)
+    fun clear() {
+        cookies.clear()
     }
 }

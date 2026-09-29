@@ -1,7 +1,6 @@
 package com.siams.kern_prototype.di
 
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
-import com.siams.kern_prototype.network.InMemoryCookieJar
 import com.siams.kern_prototype.network.LoginClient
 import com.siams.kern_prototype.network.S900Api
 import com.siams.kern_prototype.network.SessionLoginInterceptor
@@ -28,13 +27,15 @@ object NetworkModule {
         level = HttpLoggingInterceptor.Level.BASIC
     }
 
-    /** Клиент только для запроса логина: общий CookieJar, без session-интерцептора. */
+    /**
+     * Клиент только для запроса логина, без session-интерцептора. Cookie ведёт
+     * [SessionLoginInterceptor] отдельно для каждой сессии (R12) — у клиента CookieJar нет.
+     */
     @Provides
     @Singleton
     @LoginClient
-    fun provideLoginClient(cookieJar: InMemoryCookieJar): OkHttpClient =
+    fun provideLoginClient(): OkHttpClient =
         OkHttpClient.Builder()
-            .cookieJar(cookieJar)
             .followRedirects(false)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
@@ -44,11 +45,10 @@ object NetworkModule {
     @Provides
     @Singleton
     fun provideOkHttp(
-        cookieJar: InMemoryCookieJar,
         sessionInterceptor: SessionLoginInterceptor,
     ): OkHttpClient =
         OkHttpClient.Builder()
-            .cookieJar(cookieJar)
+            // Cookie — в сессиях SessionLoginInterceptor (R12), не в общем CookieJar клиента.
             // followRedirects=false — чтобы видеть 302 на форму логина и авторизоваться (§10.3).
             .followRedirects(false)
             .addInterceptor(sessionInterceptor)

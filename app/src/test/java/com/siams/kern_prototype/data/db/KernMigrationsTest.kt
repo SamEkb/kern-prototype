@@ -89,6 +89,38 @@ class KernMigrationsTest {
     }
 
     @Test
+    fun migrate4To5_keepsSentStateAndLeavesDestinationUnknown() {
+        val name = "mig4.db"
+        createFromSchema(name, 4) { db ->
+            db.execSQL(
+                """INSERT INTO drilling (id, title, passportJson, createdAt, syncStatus, remoteId, lastError,
+                   uploadedTables, totalTables, editRevision) VALUES ('d1', 'Д', '{}', 1, 'SENT', 'd1', NULL, 1, 1, 7)""",
+            )
+            db.execSQL("INSERT INTO core_table (id, drillingId, number, stackUid) VALUES ('t1', 'd1', 1, 's1')")
+            db.execSQL(
+                """INSERT INTO layer (id, tableId, lampType, filePath, thumbPath, cameraProfileJson, capturedAt,
+                   coreImageType, kernUpperDepth, kernLowerDepth, remoteImageId, metaConfirmed, staleRemoteImageId)
+                   VALUES ('l1', 't1', 'DAYLIGHT', '/f/l1.jpg', NULL, '{}', 2, 'UNKNOWN', NULL, NULL, 'img-1', 1, NULL)""",
+            )
+        }
+        val room = Room.databaseBuilder(context, KernDatabase::class.java, name)
+            .addMigrations(*KernMigrations.ALL).allowMainThreadQueries().build()
+        try {
+            runBlocking {
+                val d = room.drillingDao().getById("d1")!!
+                assertEquals("d1", d.remoteId)
+                assertEquals(7L, d.editRevision)
+                assertEquals(null, d.remoteDestination) // назначение до v5 неизвестно
+                val l = room.layerDao().getById("l1")!!
+                assertEquals("img-1", l.remoteImageId)
+                assertTrue(l.metaConfirmed)
+            }
+        } finally {
+            room.close()
+        }
+    }
+
+    @Test
     fun appOpenOfV3_makesBackupAndMigrates() {
         createFromSchema(KernDatabase.NAME, 3) { db ->
             db.execSQL(

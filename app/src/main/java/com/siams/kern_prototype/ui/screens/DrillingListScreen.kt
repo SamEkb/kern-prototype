@@ -72,6 +72,7 @@ fun DrillingListScreen(
         }
     }
     var pendingDelete by remember { mutableStateOf<DrillingWithTables?>(null) }
+    var pendingConfirm by remember { mutableStateOf<DrillingWithTables?>(null) }
 
     Scaffold(
         topBar = {
@@ -126,10 +127,38 @@ fun DrillingListScreen(
                         onOpen = { onOpenDrilling(item.drilling.id) },
                         onSend = { vm.send(item.drilling.id) },
                         onDelete = { pendingDelete = item },
+                        onConfirmServer = { pendingConfirm = item },
                     )
                 }
             }
         }
+    }
+
+    // R03: подтверждение исходного сервера для записи до v5 (назначение неизвестно).
+    val server by vm.currentServer.collectAsStateWithLifecycle()
+    pendingConfirm?.let { target ->
+        val dest = server.destination()
+        AlertDialog(
+            onDismissRequest = { pendingConfirm = null },
+            title = { Text("Подтвердить сервер отправки") },
+            text = {
+                Text(
+                    "«${target.drilling.title}» отправлялось до обновления приложения, сервер той отправки " +
+                        "не записан. Подтвердите, только если оно отправлялось на ТЕКУЩИЙ сервер " +
+                        "${dest.host}:${dest.port} под учётной записью «${dest.login}». Если не уверены — " +
+                        "сверьте с S900: ошибочное подтверждение может изменить чужой проект.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.confirmServer(target.drilling.id)
+                    pendingConfirm = null
+                }) { Text("Подтвердить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingConfirm = null }) { Text(stringResource(R.string.common_cancel)) }
+            },
+        )
     }
 
     pendingDelete?.let { target ->
@@ -156,6 +185,7 @@ private fun DrillingCard(
     onOpen: () -> Unit,
     onSend: () -> Unit,
     onDelete: () -> Unit,
+    onConfirmServer: () -> Unit,
 ) {
     Card(
         onClick = onOpen,
@@ -195,6 +225,13 @@ private fun DrillingCard(
             }
             item.drilling.lastError?.let {
                 Text(it, style = Body3, color = Red30, modifier = Modifier.padding(top = KernTokens.spaceXs))
+            }
+            // R03: запись до v5 с неизвестным сервером отправки — нужно явное подтверждение.
+            val d = item.drilling
+            if (d.remoteId != null && d.remoteDestination == null &&
+                d.syncStatus != SyncStatus.SENT && d.syncStatus != SyncStatus.SENDING
+            ) {
+                TextButton(onClick = onConfirmServer) { Text("Подтвердить сервер отправки") }
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = KernTokens.spaceSm),
