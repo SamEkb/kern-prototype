@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  s900 в поле часто доступен по http:// на локальном IP (§8.1). Разрешаем
+  cleartext-трафик. В проде рекомендуется HTTPS (§8.1) — тогда сузить политику.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -1,0 +1,131 @@
+{"attributes": [
+    {
+        "indexed": false,
+        "caption": "Месторождение",
+        "id": "field",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "field"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Номер скважины",
+        "id": "well_number",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "well_number"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Номер долбления",
+        "id": "perforation_number",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "perforation_number"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Исходная привязка отбора, кровля, м.",
+        "id": "initial_sampling_reference_top",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "initial_sampling_reference_top"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Исходная привязка отбора, подошва, м.",
+        "id": "initial_sampling_reference_bottom",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "initial_sampling_reference_bottom"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Поправка, м.",
+        "id": "depth_correction",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "depth_correction"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Вынос керна, м.",
+        "id": "сore_recovery",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "сore_recovery"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Инклинометрия",
+        "id": "inclinometry",
+        "valueClass": "class java.io.File",
+        "type": "File",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "inclinometry"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Примечание",
+        "id": "note",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "textAreaHeight": "88px",
+            "textArea": true
+        }
+    }
+]}lter": {},
+            "values": {"suggesting": {"attributeId": "depth_correction"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Вынос керна, м.",
+        "id": "сore_recovery",
+        "valueClass": "class java.lang.String",
+        "type": "String",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "сore_recovery"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Инклинометрия",
+        "id": "inclinometry",
+        "valueClass": "class java.io.File",
+        "type": "File",
+        "parameters": {
+            "filter": {},
+            "values": {"suggesting": {"attributeId": "inclinometry"}}
+        }
+    },
+    {
+        "indexed": false,
+        "caption": "Примечание",
+        "id": "note",
+        "valueC

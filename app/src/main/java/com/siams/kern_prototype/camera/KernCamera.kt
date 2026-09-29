@@ -1,0 +1,83 @@
+package com.siams.kern_prototype.camera
+
+import android.util.Size
+import android.view.Surface
+import com.siams.kern_prototype.domain.model.CameraProfile
+import com.siams.kern_prototype.domain.model.LampType
+import kotlinx.coroutines.flow.StateFlow
+import java.io.File
+
+/** Состояние камеры для HUD (§5.4). Общее для всех реализаций [KernCamera]. */
+sealed interface CameraControllerState {
+    data object Idle : CameraControllerState
+    data object Opening : CameraControllerState
+    data class Ready(val previewSize: Size, val manualSupported: Boolean) : CameraControllerState
+    data class Error(val message: String) : CameraControllerState
+}
+
+/**
+ * Абстракция «камеры керна»: единая точка управления съёмкой и применения
+ * профилей (§6, §13), одинаковая для встроенной камеры телефона (Camera2,
+ * [CameraController]) и внешней USB-камеры Touptek ([ToupcamController]).
+ *
+ * Порядок использования из UI/VM неизменен для обеих реализаций:
+ *  1) [open] — подключить/открыть камеру и загрузить профиль под [LampType]
+ *     (Ready содержит previewSize);
+ *  2) UI отдаёт [Surface] превью нужного размера и зовёт [startSession];
+ *  3) [switchLamp]/[applyProfile] — мгновенное применение параметров без
+ *     перезапуска потока;
+ *  4) [capture] — снять кадр максимального качества в файл; [release] — освободить.
+ *
+ * §13: никаких «сырых» вызовов камеры из экранов — только через эту абстракцию.
+ */
+interface KernCamera {
+    /** Поток состояния для HUD. */
+    val state: StateFlow<CameraControllerState>
+
+    /** Текущий применённый профиль (для аудита идентичности и HUD). */
+    val activeProfile: CameraProfile
+
+    /** Открыть/подключить камеру, выбрать размеры, загрузить профиль под [lampType]. */
+    suspend fun open(lampType: LampType)
+
+    /** Создать сессию превью на [surface] и запустить поток кадров с текущим профилем. */
+    suspend fun startSession(surface: Surface)
+
+    /** Мгновенно применить профиль без перезапуска потока (§6.4). */
+    suspend fun applyProfile(profile: CameraProfile)
+
+    /** Переключить тип освещения: прочитать сохранённый профиль и применить (§6.4). */
+    suspend fun switchLamp(lampType: LampType)
+
+    /**
+     * Снять кадр максимального качества в [target] (§6.5). Возвращает применённый
+     * профиль (для аудита идентичности).
+     */
+    suspend fun capture(target: File, lampType: LampType): CameraProfile
+
+    /**
+     * §2.1: автоэкспозиция «в одно нажатие». Включает авто-AE с приоритетом выдержки
+     * (усиление ограничено во избежание зернистости), даёт сойтись, замораживает
+     * авто и возвращает [current] с подставленными выдержкой и усилением.
+     * По умолчанию — не поддерживается (возвращает [current] без изменений).
+     */
+    suspend fun autoExposure(current: CameraProfile): CameraProfile = current
+
+    /**
+     * §2.2: автобаланс белого «в одно нажатие». Возвращает [current] с подставленными
+     * поканальными усилениями (R/G/B). По умолчанию — не поддерживается.
+     */
+    suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile = current
+
+    /**
+     * §2.3: снять эталонный кадр FFC для [lampType] (по белому равномерному фону),
+     * применить лёгкое размытие и сохранить шаблон неравномерности. Возвращает путь
+     * к файлу шаблона (его нужно записать в профиль), либо null — если не поддерживается.
+     * Коррекция снимков делением на шаблон выполняется внутри [capture] по
+     * [CameraProfile.ffcTemplatePath].
+     */
+    suspend fun captureFfcReference(lampType: LampType): String? = null
+
+    /** Освободить ресурсы камеры. */
+    fun release()
+}
