@@ -1,127 +1,199 @@
 package com.siams.kern_prototype.camera
 
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Rect
-import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbDeviceConnection
-import android.hardware.usb.UsbManager
-import android.os.Build
-import android.os.Handler
-import android.os.HandlerThread
 import android.util.Log
 import android.util.Size
 import android.view.Surface
-import androidx.core.content.ContextCompat
-import com.droid.usbcam.CamLib
 import com.siams.kern_prototype.data.settings.CameraProfileStore
+import com.siams.kern_prototype.data.storage.FfcFiles
+import com.siams.kern_prototype.data.storage.writeAtomically
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
 import javax.inject.Inject
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 import kotlin.math.pow
 
 /**
  * Реализация [KernCamera] для внешней USB-камеры **Touptek E3ISPM20000KPA** (§3).
  * Основной путь съёмки: смартфон ↔ камера по USB-OTG через ToupCam SDK (нативный
  * `libtoupcam.so` + мост `libjnicam.so` из `jnicam.cpp` + Java-обёртка
- * [com.droid.usbcam.CamLib]), а не через Camera2 телефона.
+ * [com.droid.usbcam.CamLib], доступ — через [ToupcamDevice]), а не через Camera2 телефона.
  *
  * Последовательность (по официальному демо ToupTek + `toupcam.h`):
- *  1) [open] — найти камеру в [UsbManager] по `CamLib.getModelName(vid,pid)`,
- *     получить USB-доступ, передать file descriptor в `CamLib.OpenDevice("fd-…")`,
- *     нативно выбрать разрешения и запустить pull-режим; применить профиль;
+ *  1) [open] — найти камеру по USB, получить доступ, открыть и запустить pull-режим
+ *     ([CamLibDevice]); применить профиль;
  *  2) [startSession] — кадры EVENT_IMAGE тянем в Bitmap и рисуем на превью-Surface;
  *  3) [capture] — `snap()` полного разрешения → EVENT_STILLIMAGE → Bitmap → JPEG в файл;
  *  4) [applyProfile]/[switchLamp] — мгновенно меняют экспозицию/усиление/WB.
  *
- * §13: вся работа с камерой централизована здесь + в [CamLib]/[ToupcamProfileApplier].
+ * Жизненный цикл подключения (п.1–5 ревью):
+ *  - подключение — [CameraConnection]: единственный на процесс владелец хэндла SDK; все
+ *    обращения к камере (открытие, Snap, настройки, AE/AWB, чтение кадров, закрытие) идут
+ *    последовательно в его очереди и не выполняются после закрытия;
+ *  - закрытие принадлежит подключению и возможно в любой момент, в том числе во время
+ *    подключения; новое подключение начинается только после полного закрытия прежнего;
+ *  - снимок учитывается [StillGate]: после неопределённого исхода — только через
+ *    переподключение, в том числе если предыдущее переподключение не удалось.
+ *
+ * §13: вся работа с камерой централизована здесь + в [ToupcamDevice]/[ToupcamProfileApplier].
  */
-class ToupcamController @Inject constructor(
-    @ApplicationContext private val context: Context,
+class ToupcamController internal constructor(
+    private val context: Context,
     private val profileStore: CameraProfileStore,
+    private val deviceFactory: () -> ToupcamDevice,
+    private val snapTimeoutMs: Long,
+    private val shutdownWaitMs: Long,
 ) : KernCamera {
+
+    @Inject
+    constructor(
+        @ApplicationContext context: Context,
+        profileStore: CameraProfileStore,
+    ) : this(context, profileStore, { CamLibDevice(context) }, SNAP_TIMEOUT_MS, SHUTDOWN_WAIT_MS)
 
     private val _state = MutableStateFlow<CameraControllerState>(CameraControllerState.Idle)
     override val state: StateFlow<CameraControllerState> = _state.asStateFlow()
 
+    @Volatile
     private var currentProfile: CameraProfile = CameraProfile.defaultFor(LampType.DAYLIGHT)
     override val activeProfile: CameraProfile get() = currentProfile
 
-    private var camera: CamLib? = null
-    private var eventThread: HandlerThread? = null
-    private var eventHandler: Handler? = null
+    // Текущее подключение (null — не подключено): владелец хэндла SDK и его очередь операций.
+    @Volatile private var connection: CameraConnection? = null
 
     private var previewSize = Size(1920, 1080)
     private var stillSize = Size(1920, 1080)
-    // Кросс-поточные (пишутся в open()/startSession/capture, читаются в потоке событий SDK) → @Volatile.
+    // Буфер превью используется только очередью подключения; освобождается её закрытием.
     @Volatile private var previewBitmap: Bitmap? = null
+    // Буфер снимка переиспользуется в пределах подключения. При переподключении не
+    // освобождается явно (им может ещё пользоваться сохранение снимка) — освободит GC.
     @Volatile private var stillBitmap: Bitmap? = null
+    // Поверхность, на которую рисуется превью; [sessionSurface] переживает переподключение.
     @Volatile private var previewSurface: Surface? = null
+    @Volatile private var sessionSurface: Surface? = null
     @Volatile private var frameEvents = 0L
 
     // Кэш загруженного эталона FFC (§2.3), чтобы не декодировать PNG на каждый снимок.
     @Volatile private var cachedTemplate: Bitmap? = null
     @Volatile private var cachedTemplatePath: String? = null
 
-    // Ожидающий снимок: резолвится из потока событий по EVENT_STILLIMAGE.
-    @Volatile
-    private var pendingStill: ((Result<Unit>) -> Unit)? = null
+    // Операция снимка, поколения подключений и признак «нужно переподключение».
+    private val stillGate = StillGate<Bitmap>()
+
+    // true после release(): никаких переподключений (в т.ч. из снимка, начатого до release).
+    @Volatile private var released = false
 
     override suspend fun open(lampType: LampType) {
-        if (camera != null) return
+        released = false
+        if (connection != null) return
         _state.value = CameraControllerState.Opening
         currentProfile = profileStore.read(lampType)
         try {
-            withContext(Dispatchers.IO) {
-                val cam = CamLib.getInstance() // грузит libtoupcam.so + libjnicam.so
-                cam.init()
-                startEventThread(cam)          // Handler для CamLib.OnEvent (до открытия!)
-                connectUsb(cam)                // USB-доступ → OpenDevice → StartPull (нативно)
-                readSizes(cam)
-                ToupcamProfileApplier.apply(cam, currentProfile)
-                previewBitmap = Bitmap.createBitmap(previewSize.width, previewSize.height, Bitmap.Config.ARGB_8888)
-                camera = cam
-            }
-            _state.value = CameraControllerState.Ready(previewSize, manualSupported = true)
+            connect(currentProfile)
         } catch (t: Throwable) {
-            releaseInternal()
             _state.value = CameraControllerState.Error(t.message ?: "Ошибка подключения камеры Touptek")
             throw t
         }
     }
 
+    /**
+     * Подключить камеру с [profile]. Сначала — владение камерой на процесс: пока прежнее
+     * подключение (этого или другого контроллера) не закрыто целиком, новое не начинается.
+     * [release] в любой момент подключения закрывает именно это подключение ([CameraConnection]).
+     */
+    private suspend fun connect(profile: CameraProfile) {
+        var generation = 0L
+        val conn = CameraConnection.open(deviceFactory(), shutdownWaitMs) { dev, event ->
+            onSdkEvent(dev, event, generation)
+        }
+        generation = stillGate.startConnection() // события начнутся только после open() устройства
+        connection = conn
+        try {
+            check(!released) { "Камера освобождена" } // release() до записи поля — см. выше
+            conn.connect()                             // USB-доступ → открыть → поток кадров
+            conn.run { dev ->
+                readSizes(dev)
+                ToupcamProfileApplier.apply(dev, profile)
+            }
+            previewBitmap = Bitmap.createBitmap(previewSize.width, previewSize.height, Bitmap.Config.ARGB_8888)
+            // release() пришёл, пока шло подключение, — подключение уже закрывается.
+            check(!released && connection === conn && !conn.isClosed) { "Камера освобождена" }
+            stillGate.connected()
+            _state.value = CameraControllerState.Ready(previewSize, manualSupported = true)
+        } catch (t: Throwable) {
+            closeConnection(conn)
+            throw t
+        }
+    }
+
+    /**
+     * Восстановление после снимка с неизвестным исходом или потери подключения: закрыть
+     * прежнее подключение (после его текущей операции) и открыть заново с тем же профилем и
+     * поверхностью превью. USB-доступ уже выдан. Неудача оставляет признак восстановления —
+     * следующий снимок (в т.ч. эталона FFC) снова попробует переподключиться.
+     * Способ восстановления требует проверки на телефоне с камерой.
+     */
+    private suspend fun reconnect() {
+        // Освобождённый контроллер камеру не открывает: иначе снимок, начатый до release(),
+        // по таймауту занял бы камеру параллельно со следующим экраном.
+        check(!released) { "Камера освобождена" }
+        val profile = currentProfile
+        Log.w(TAG, "Переподключение камеры")
+        _state.value = CameraControllerState.Opening
+        connection?.let { closeConnection(it) }
+        try {
+            connect(profile)
+        } catch (t: Throwable) {
+            stillGate.markRecoveryRequired()
+            _state.value = CameraControllerState.Error(
+                "Не удалось переподключить камеру: ${t.message}. Повторите снимок для новой попытки.",
+                canRetry = true,
+            )
+            throw t
+        }
+        previewSurface = sessionSurface
+    }
+
+    /** Подключение для снимка: если нужно восстановление — сначала переподключение. */
+    private suspend fun connectionForSnap(): CameraConnection {
+        if (stillGate.needsRecovery) reconnect()
+        return connection ?: error("Камера Touptek не открыта")
+    }
+
     override suspend fun startSession(surface: Surface) {
-        camera ?: error("Камера Touptek не открыта")
+        connection ?: error("Камера Touptek не открыта")
         // Поток кадров уже запущен в open(); достаточно дать поверхность для отрисовки.
+        sessionSurface = surface
         previewSurface = surface
     }
 
     override suspend fun applyProfile(profile: CameraProfile) {
         currentProfile = profile
-        val cam = camera ?: return
-        withContext(Dispatchers.IO) { ToupcamProfileApplier.apply(cam, profile) }
+        val conn = connection ?: return
+        try {
+            conn.run { ToupcamProfileApplier.apply(it, profile) }
+        } catch (e: IllegalStateException) {
+            if (!conn.isClosed) throw e // камера освобождена — применять некуда (как раньше без камеры)
+        }
     }
 
     override suspend fun switchLamp(lampType: LampType) {
         applyProfile(profileStore.read(lampType))
     }
+
 
     /**
      * §2.1: автоэкспозиция «в одно нажатие». Приоритет — минимизировать выдержку не выходит:
@@ -129,21 +201,25 @@ class ToupcamController @Inject constructor(
      * выдержку. Даём авто сойтись, читаем выдержку/усиление, ЗАМОРАЖИВАЕМ авто (детерминизм,
      * §6.2) и возвращаем профиль с подставленными значениями.
      */
-    override suspend fun autoExposure(current: CameraProfile): CameraProfile = withContext(Dispatchers.IO) {
-        val cam = camera ?: return@withContext current
-        cam.setMaxAutoExpoTimeAGain(AE_MAX_TIME_US, AE_MAX_GAIN_PERCENT)
-        cam.setAutoExpoEnable(1)               // включить авто-AE
+    override suspend fun autoExposure(current: CameraProfile): CameraProfile {
+        val conn = connection ?: return current
+        // Вызовы SDK и их порядок — прежние; каждый шаг — в очереди подключения.
+        conn.run { cam ->
+            cam.setMaxAutoExpoTimeAGain(AE_MAX_TIME_US, AE_MAX_GAIN_PERCENT)
+            cam.setAutoExpoEnable(1)           // включить авто-AE
+        }
         delay(AE_CONVERGE_MS)                  // дать сойтись (~кадры на нашем fps)
-        val us = cam.getExpoTime()
-        val gainPct = cam.getExpoAGain()
-        cam.setAutoExpoEnable(0)               // заморозить — дальше только ручное
-        val updated = current.copy(
-            exposureTimeNs = us.toLong() * 1_000L,
-            iso = gainPct,
-        )
-        ToupcamProfileApplier.apply(cam, updated)
+        val updated = conn.run { cam ->
+            val us = cam.getExpoTime()
+            val gainPct = cam.getExpoAGain()
+            cam.setAutoExpoEnable(0)           // заморозить — дальше только ручное
+            current.copy(
+                exposureTimeNs = us.toLong() * 1_000L,
+                iso = gainPct,
+            ).also { ToupcamProfileApplier.apply(cam, it) }
+        }
         currentProfile = updated
-        updated
+        return updated
     }
 
     /**
@@ -151,32 +227,34 @@ class ToupcamController @Inject constructor(
      * читаем поканальные усиления и переводим их в множители профиля (обратно к
      * [ToupcamProfileApplier.toWbGain]: multiplier = 2^(gain/64)). Зелёный — опорный (1.0).
      */
-    override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile = withContext(Dispatchers.IO) {
-        val cam = camera ?: return@withContext current
-        cam.awbOnce()
+    override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile {
+        val conn = connection ?: return current
+        conn.run { it.awbOnce() }
         delay(AWB_SETTLE_MS)
-        val g = cam.getWhiteBalanceGain()      // [R, G, B], знаковые (-127..127)
-        val red = 2.0.pow((g.getOrElse(0) { 0 }) / 64.0).toFloat()
-        val blue = 2.0.pow((g.getOrElse(2) { 0 }) / 64.0).toFloat()
-        val updated = current.copy(
-            wbRedGain = red,
-            wbGreenEvenGain = 1f,
-            wbGreenOddGain = 1f,
-            wbBlueGain = blue,
-        )
-        ToupcamProfileApplier.apply(cam, updated)
+        val updated = conn.run { cam ->
+            val g = cam.getWhiteBalanceGain()  // [R, G, B], знаковые (-127..127)
+            val red = 2.0.pow((g.getOrElse(0) { 0 }) / 64.0).toFloat()
+            val blue = 2.0.pow((g.getOrElse(2) { 0 }) / 64.0).toFloat()
+            current.copy(
+                wbRedGain = red,
+                wbGreenEvenGain = 1f,
+                wbGreenOddGain = 1f,
+                wbBlueGain = blue,
+            ).also { ToupcamProfileApplier.apply(cam, it) }
+        }
         currentProfile = updated
-        updated
+        return updated
     }
 
+
     override suspend fun capture(target: File, lampType: LampType): CameraProfile {
-        camera ?: error("Камера Touptek не открыта")
         val profile = currentProfile
         withContext(Dispatchers.IO) {
-            val still = snapStillBlocking()
-            applyFfcIfConfigured(still, profile)   // §2.3: нормализация делением на эталон
-            target.parentFile?.mkdirs()
-            target.outputStream().use { out ->
+            val conn = connectionForSnap()
+            val still = snapStillBlocking(conn)
+            applyFfcIfConfigured(conn, still, profile) // §2.3: нормализация делением на эталон
+            // R09: неудачный compress — ошибка съёмки; R08: файл появляется целиком или никак.
+            writeAtomically(target) { out ->
                 still.compress(Bitmap.CompressFormat.JPEG, profile.jpegQuality.coerceIn(1, 100), out)
             }
         }
@@ -189,55 +267,87 @@ class ToupcamController @Inject constructor(
      * неравномерности; сохраняем PNG рядом в filesDir (свой на профиль). Путь пишем в профиль.
      */
     override suspend fun captureFfcReference(lampType: LampType): String = withContext(Dispatchers.IO) {
-        camera ?: error("Камера Touptek не открыта")
-        val still = snapStillBlocking()
+        val still = snapStillBlocking(connectionForSnap())
         val h = (FFC_TEMPLATE_WIDTH.toLong() * still.height / still.width).toInt().coerceAtLeast(1)
         val small = Bitmap.createScaledBitmap(still, FFC_TEMPLATE_WIDTH, h, true)
         val template = boxBlur(small, FFC_BLUR_RADIUS, FFC_BLUR_PASSES)
         if (template !== small) small.recycle()
-        val file = ffcFile(lampType)
-        file.parentFile?.mkdirs()
-        file.outputStream().use { template.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        // сбросить кэш и подхватить свежий шаблон
+        // R11: всегда новый файл — эталон подтверждённого профиля не перезаписывается.
+        // Профиль переключится на него только при «Сохранить».
+        val file = FfcFiles.newFile(context, lampType)
+        writeAtomically(file) { template.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        // подхватить свежий шаблон (прежний не освобождаем явно — может использоваться снимком)
         synchronized(this@ToupcamController) {
-            cachedTemplate?.recycle(); cachedTemplate = template; cachedTemplatePath = file.absolutePath
+            cachedTemplate = template; cachedTemplatePath = file.absolutePath
         }
         file.absolutePath
     }
 
-    /** Полнокадровый снимок с ожиданием EVENT_STILLIMAGE (§3c). Возвращает [stillBitmap]. */
-    private suspend fun snapStillBlocking(): Bitmap {
-        val cam = camera ?: error("Камера Touptek не открыта")
+    /**
+     * Полнокадровый снимок с ожиданием EVENT_STILLIMAGE (§3c). Возвращает буфер с кадром.
+     *
+     * Операция занята до конца ЧТЕНИЯ кадра. Таймаут или отмена (в том числе во время чтения)
+     * оставляют исход неизвестным: запоздавшее событие/чтение не должно завершить следующий
+     * снимок, поэтому камера переводится в режим восстановления (переподключение).
+     */
+    private suspend fun snapStillBlocking(conn: CameraConnection): Bitmap {
         val still = ensureStillBitmap()
-        withTimeout(SNAP_TIMEOUT_MS) {
-            suspendCancellableCoroutine<Unit> { cont ->
-                pendingStill = { result ->
-                    if (cont.isActive) result.fold({ cont.resume(Unit) }, { cont.resumeWithException(it) })
-                }
-                cont.invokeOnCancellation { pendingStill = null }
-                runCatching { cam.snap() }.onFailure {
-                    pendingStill = null
-                    if (cont.isActive) cont.resumeWithException(it)
-                }
-            }
+        val done = CompletableDeferred<Unit>()
+        val pending = stillGate.begin(still) { result ->
+            result.fold({ done.complete(Unit) }, { done.completeExceptionally(it) })
+        }
+        // Snap — в очереди подключения (не пересекается с закрытием камеры).
+        val accepted = try {
+            conn.run { dev -> runCatching { dev.snap() }.getOrDefault(false) }
+        } catch (e: CancellationException) {
+            stillGate.abandon(pending) // Snap мог успеть выполниться — исход неизвестен
+            throw e
+        } catch (e: Throwable) {
+            stillGate.rejected(pending) // подключение закрыто — Snap не выполнялся
+            throw e
+        }
+        // R09: отказ Snap в SDK — ошибка, а не ожидание до таймаута (события не будет).
+        if (!accepted) {
+            stillGate.rejected(pending)
+            error("Камера отклонила снимок (Snap)")
+        }
+        try {
+            withTimeout(snapTimeoutMs) { done.await() }
+        } catch (e: TimeoutCancellationException) {
+            stillGate.abandon(pending)
+            val recovered = runCatching { reconnect() }.isSuccess
+            throw IllegalStateException(
+                "Камера не вернула снимок за ${snapTimeoutMs / 1000} с. " +
+                    if (recovered) "Камера переподключена — повторите снимок." else "Повторите снимок для переподключения.",
+                e,
+            )
+        } catch (e: CancellationException) {
+            stillGate.abandon(pending) // событие/чтение может ещё завершиться — до восстановления не снимать
+            throw e
         }
         return still
     }
 
-    /** §2.3: если у профиля задан эталон — нормализовать снимок делением (нативно, in-place). */
-    private fun applyFfcIfConfigured(still: Bitmap, profile: CameraProfile) {
+    /**
+     * §2.3: если у профиля задан эталон — нормализовать снимок делением (нативно, in-place).
+     * Эталон не задан — снимок без коррекции (как раньше). Эталон задан, но не читается или
+     * коррекция не выполнена — ОШИБКА снимка: молча снять без настроенной коррекции нельзя
+     * (снимки стали бы несопоставимы).
+     */
+    private fun applyFfcIfConfigured(conn: CameraConnection, still: Bitmap, profile: CameraProfile) {
         val path = profile.ffcTemplatePath
         if (path.isBlank()) return
-        val tmpl = loadTemplate(path) ?: return
-        runCatching { camera?.applyFlatField(still, tmpl) }
+        val tmpl = loadTemplate(path) ?: error(
+            "Эталон FFC профиля «${profile.lampType.ruLabel}» не читается. " +
+                "Переснимите эталон в «Профилях камеры» и сохраните профиль.",
+        )
+        // Коррекция работает только с пикселями буферов (хэндл камеры не нужен) — вне очереди.
+        check(conn.device.applyFlatField(still, tmpl)) { "Не удалось применить коррекцию FFC к снимку" }
     }
-
-    private fun ffcFile(lamp: LampType): File = File(context.filesDir, "ffc/ffc_${lamp.name}.png")
 
     private fun loadTemplate(path: String): Bitmap? = synchronized(this) {
         if (cachedTemplatePath == path && cachedTemplate?.isRecycled == false) return cachedTemplate
-        val bmp = runCatching { BitmapFactory.decodeFile(path) }.getOrNull() ?: return null
-        cachedTemplate?.recycle()
+        val bmp = FfcFiles.decodeTemplate(path) ?: return null
         cachedTemplate = bmp
         cachedTemplatePath = path
         bmp
@@ -291,26 +401,22 @@ class ToupcamController @Inject constructor(
         }
     }
 
+
     override fun release() {
-        releaseInternal()
+        released = true
+        sessionSurface = null
+        connection?.let { closeConnection(it) }
         _state.value = CameraControllerState.Idle
     }
 
-    // ---- События SDK (поток eventThread) ---------------------------------------
+    // ---- События SDK (очередь CameraConnection подключения) ---------------------
 
-    private fun startEventThread(cam: CamLib) {
-        val thread = HandlerThread("toupcam-events").also { it.start() }
-        val handler = Handler(thread.looper) { msg ->
-            if (msg.what == CamLib.MSG_EVENT) onSdkEvent(msg.arg1)
-            true
+    private fun onSdkEvent(dev: ToupcamDevice, event: Int, generation: Long) {
+        // Событие прежнего подключения — не относится к текущей камере.
+        if (generation != stillGate.currentGeneration()) {
+            Log.w(TAG, "Событие 0x${Integer.toHexString(event)} прежнего подключения — проигнорировано")
+            return
         }
-        eventThread = thread
-        eventHandler = handler
-        cam.setLocalHandler(handler)
-    }
-
-    private fun onSdkEvent(event: Int) {
-        val cam = camera ?: return
         when (event) {
             EVENT_IMAGE -> {
                 frameEvents++
@@ -325,26 +431,32 @@ class ToupcamController @Inject constructor(
                 if (frameEvents == 1L || frameEvents % 30 == 0L) {
                     Log.i(TAG, "EVENT_IMAGE #$frameEvents: рисуем $previewSize")
                 }
-                cam.pullImage(bmp)
+                dev.pullImage(bmp)
                 blit(bmp, surface)
             }
 
             EVENT_STILLIMAGE -> {
-                val bmp = stillBitmap
-                val cb = pendingStill
-                pendingStill = null
-                if (bmp != null) {
-                    cam.pullStillImage(bmp)
-                    cb?.invoke(Result.success(Unit))
-                } else {
-                    cb?.invoke(Result.failure(IllegalStateException("Нет буфера снимка")))
+                // Только ожидаемый снимок текущего подключения; операция остаётся занятой до
+                // конца чтения. Позднее событие (после таймаута) не завершает новую операцию.
+                val pending = stillGate.take(generation)
+                if (pending == null) {
+                    Log.w(TAG, "EVENT_STILLIMAGE без ожидающего снимка — проигнорировано")
+                    return
                 }
+                // R09: успех — только если SDK действительно отдал новый кадр; иначе в буфере
+                // остался бы прошлый снимок, который сохранился бы под новым слоем.
+                val result = runCatching {
+                    check(dev.pullStillImage(pending.target)) { "Камера не отдала снимок (PullStillImage)" }
+                }
+                stillGate.finish(pending, result)
             }
 
             EVENT_ERROR, EVENT_DISCONNECTED -> {
-                _state.value = CameraControllerState.Error("Камера Touptek отключена")
-                pendingStill?.invoke(Result.failure(IllegalStateException("Камера отключена во время снимка")))
-                pendingStill = null
+                stillGate.fail(IllegalStateException("Камера отключена во время снимка"))
+                _state.value = CameraControllerState.Error(
+                    "Камера Touptek отключена. Подключите её и повторите снимок.",
+                    canRetry = true,
+                )
             }
         }
     }
@@ -365,29 +477,15 @@ class ToupcamController @Inject constructor(
 
     // ---- Подключение USB и размеры ---------------------------------------------
 
-    private suspend fun connectUsb(cam: CamLib) {
-        val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
-        val dev = usb.deviceList.values.firstOrNull { d ->
-            CamLib.getModelName(d.vendorId, d.productId) != null
-        } ?: error("USB-камера Touptek не найдена. Подключите её к телефону через USB-OTG.")
 
-        if (!usb.hasPermission(dev)) requestUsbPermission(usb, dev)
 
-        val conn = usb.openDevice(dev) ?: error("Не удалось открыть USB-устройство камеры.")
-        try {
-            val ok = cam.OpenDevice(dev.vendorId, dev.productId, conn.fileDescriptor)
-            if (!ok) error("Не удалось открыть камеру Touptek (OpenDevice).")
-        } finally {
-            // SDK дублирует fd внутри (как в официальном демо) — соединение можно закрыть.
-            runCatching { conn.close() }
-        }
-    }
+    // ---- Размеры и буферы ---------------------------------------------------------
 
-    private fun readSizes(cam: CamLib) {
-        cam.getPreviewSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }?.let {
+    private fun readSizes(dev: ToupcamDevice) {
+        dev.previewSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }?.let {
             previewSize = Size(it[0], it[1])
         }
-        cam.getStillSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }?.let {
+        dev.stillSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }?.let {
             stillSize = Size(it[0], it[1])
         }
         Log.i(TAG, "Touptek: preview=$previewSize still=$stillSize")
@@ -398,67 +496,46 @@ class ToupcamController @Inject constructor(
         if (existing != null && existing.width == stillSize.width && existing.height == stillSize.height) {
             return existing
         }
-        existing?.recycle()
         return Bitmap.createBitmap(stillSize.width, stillSize.height, Bitmap.Config.ARGB_8888)
             .also { stillBitmap = it }
     }
 
-    /** Запросить USB-доступ у пользователя и дождаться ответа (§5 манифеста). */
-    private suspend fun requestUsbPermission(usb: UsbManager, device: UsbDevice) =
-        suspendCancellableCoroutine<Unit> { cont ->
-            val action = "${context.packageName}.TOUPCAM_USB_PERMISSION"
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(ctx: Context, intent: Intent) {
-                    if (intent.action != action) return
-                    runCatching { context.unregisterReceiver(this) }
-                    if (!cont.isActive) return
-                    val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                    if (granted) {
-                        cont.resume(Unit)
-                    } else {
-                        cont.resumeWithException(SecurityException("Доступ к USB-камере не выдан."))
-                    }
-                }
+    /**
+     * Закрыть подключение [conn] (идемпотентно). Закрытие принадлежит самому подключению: камера
+     * закрывается в его очереди после текущей операции, даже если [conn] ещё подключается.
+     * Состояние контроллера сбрасывается, только если [conn] — текущее подключение. Буферы снимка
+     * и эталона лишь отпускаются (ими может пользоваться сохранение снимка) — освободит GC.
+     */
+    private fun closeConnection(conn: CameraConnection) {
+        var preview: Bitmap? = null
+        if (connection === conn) {
+            stillGate.fail(IllegalStateException("Камера освобождена"))
+            preview = previewBitmap
+            connection = null
+            previewSurface = null
+            previewBitmap = null
+            stillBitmap = null
+            synchronized(this) {
+                cachedTemplate = null
+                cachedTemplatePath = null
             }
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0
-            val pi = PendingIntent.getBroadcast(context, 0, Intent(action).setPackage(context.packageName), flags)
-            ContextCompat.registerReceiver(
-                context, receiver, IntentFilter(action), ContextCompat.RECEIVER_NOT_EXPORTED,
-            )
-            cont.invokeOnCancellation { runCatching { context.unregisterReceiver(receiver) } }
-            usb.requestPermission(device, pi)
         }
-
-    private fun releaseInternal() {
-        pendingStill?.invoke(Result.failure(IllegalStateException("Камера освобождена")))
-        pendingStill = null
-        val cam = camera
-        camera = null
-        previewSurface = null
-        runCatching { cam?.setLocalHandler(null) }
-        runCatching { cam?.releaseCamera() }
-        eventThread?.quitSafely()
-        eventThread = null
-        eventHandler = null
-        runCatching { previewBitmap?.recycle() }
-        runCatching { stillBitmap?.recycle() }
-        runCatching { cachedTemplate?.recycle() }
-        previewBitmap = null
-        stillBitmap = null
-        cachedTemplate = null
-        cachedTemplatePath = null
+        conn.close { runCatching { preview?.recycle() } }
     }
 
     companion object {
         private const val TAG = "ToupcamController"
 
         // Коды событий toupcam.h.
-        private const val EVENT_IMAGE = 0x0004
-        private const val EVENT_STILLIMAGE = 0x0005
-        private const val EVENT_ERROR = 0x0080
-        private const val EVENT_DISCONNECTED = 0x0081
+        internal const val EVENT_IMAGE = 0x0004
+        internal const val EVENT_STILLIMAGE = 0x0005
+        internal const val EVENT_ERROR = 0x0080
+        internal const val EVENT_DISCONNECTED = 0x0081
 
-        private const val SNAP_TIMEOUT_MS = 15_000L
+        internal const val SNAP_TIMEOUT_MS = 15_000L
+
+        /** Сколько ждать завершения обработчика прежнего подключения перед новым (п.3). */
+        internal const val SHUTDOWN_WAIT_MS = 10_000L
 
         // Авто-AE (§2.1): низкий потолок усиления → приоритет выдержке; лимит выдержки и
         // время сходимости подобраны с запасом (керн статичен, длинная выдержка допустима).

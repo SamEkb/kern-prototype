@@ -19,6 +19,9 @@ interface TableDao {
     @Update
     suspend fun update(table: TableEntity)
 
+    @Query("UPDATE core_table SET number = :number WHERE id = :id")
+    suspend fun setNumber(id: String, number: Int): Int
+
     @Query("DELETE FROM core_table WHERE id = :id")
     suspend fun deleteById(id: String)
 

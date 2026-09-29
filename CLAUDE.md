@@ -123,7 +123,7 @@ DataStore · Retrofit/OkHttp (kotlinx.serialization) · WorkManager · Hilt · C
   `ndkVersion=28.2.13676358`, `abiFilters=arm64-v8a,armeabi-v7a`. Собрано и упаковано:
   APK содержит `libtoupcam.so`+`libjnicam.so` под обе ABI.
 - **Дизайн §14**: иконки → Material Symbols Outlined; строки вынесены в `strings.xml`
-  (RU). БД: version=3, `fallbackToDestructiveMigration`.
+  (RU). БД: version=4, явные миграции (`KernMigrations`, схемы в `app/schemas`, тесты `KernMigrationsTest`), копия БД перед обновлением (`DatabaseBackup`); разрушительного fallback нет (v1–v2 и сбой копии останавливают обновление).
 
 **Заблокировано / остаётся вручную:**
 - Динамическая загрузка полей паспорта с сервера — ждёт REST-эндпоинт §10.1 (сейчас

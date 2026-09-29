@@ -12,7 +12,8 @@ sealed interface CameraControllerState {
     data object Idle : CameraControllerState
     data object Opening : CameraControllerState
     data class Ready(val previewSize: Size, val manualSupported: Boolean) : CameraControllerState
-    data class Error(val message: String) : CameraControllerState
+    /** [canRetry] — повторный снимок попробует переподключить камеру (кнопка спуска доступна). */
+    data class Error(val message: String, val canRetry: Boolean = false) : CameraControllerState
 }
 
 /**

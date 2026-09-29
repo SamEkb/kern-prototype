@@ -1,8 +1,6 @@
 package com.droid.usbcam;
 
 import android.graphics.Bitmap;
-import android.os.Handler;
-import android.os.Message;
 
 /**
  * JNI-обёртка ToupCam SDK для камеры Touptek (§3). Пакет com.droid.usbcam сохранён,
@@ -11,13 +9,17 @@ import android.os.Message;
  * ручные параметры (экспозиция/усиление/баланс белого/опции).
  *
  * Нативная библиотека грузится статически: libtoupcam.so (C API) + libjnicam.so (мост).
- * Событие камеры приходит из натива в {@link #OnEvent(int)} и пересылается в Handler.
+ * Событие камеры приходит из натива в {@link #OnEvent(int)} и пересылается слушателю.
  */
 public class CamLib {
-    public static final int MSG_EVENT = 100;
+
+    /** Получатель событий SDK. Вызывается в потоке SDK — не должен блокировать. */
+    public interface EventListener {
+        void onEvent(int event);
+    }
 
     private static CamLib sInstance;
-    private static Handler localHandler = null;
+    private static volatile EventListener sListener = null;
 
     static {
         System.loadLibrary("toupcam");
@@ -30,8 +32,9 @@ public class CamLib {
         return sInstance;
     }
 
-    public void setLocalHandler(Handler handler) {
-        localHandler = handler;
+    /** Слушатель событий SDK; null — события отбрасываются. */
+    public void setEventListener(EventListener listener) {
+        sListener = listener;
     }
 
     /** Открыть камеру по file descriptor из UsbDeviceConnection. true — если поток запущен. */
@@ -40,15 +43,10 @@ public class CamLib {
         return isAlive();
     }
 
-    /** Вызывается ИЗ нативного колбэка (поток SDK). Пересылает код события в Handler. */
+    /** Вызывается ИЗ нативного колбэка (поток SDK). Пересылает код события слушателю. */
     public void OnEvent(int event) {
-        final Handler h = localHandler;
-        if (h != null) {
-            Message msg = h.obtainMessage();
-            msg.what = MSG_EVENT;
-            msg.arg1 = event;
-            h.sendMessage(msg);
-        }
+        final EventListener l = sListener;
+        if (l != null) l.onEvent(event);
     }
 
     // ---- native ------------------------------------------------------------
@@ -68,11 +66,14 @@ public class CamLib {
     /** Забрать очередной кадр превью в Bitmap ARGB_8888 (по событию EVENT_IMAGE). */
     public native void pullImage(Bitmap bitmap);
 
-    /** Забрать снимок в Bitmap ARGB_8888 (по событию EVENT_STILLIMAGE). */
-    public native void pullStillImage(Bitmap bitmap);
+    /**
+     * Забрать снимок в Bitmap ARGB_8888 (по событию EVENT_STILLIMAGE).
+     * @return true — в bitmap новый кадр; false — SDK не отдал кадр (bitmap не изменён).
+     */
+    public native boolean pullStillImage(Bitmap bitmap);
 
-    /** Запустить полнокадровый снимок → придёт EVENT_STILLIMAGE. */
-    public native void snap();
+    /** Запустить полнокадровый снимок → придёт EVENT_STILLIMAGE. false — SDK отклонил Snap. */
+    public native boolean snap();
 
     public native void setAutoExpoEnable(int mode);         // 0 = ручная экспозиция
 
@@ -95,8 +96,9 @@ public class CamLib {
     /**
      * §2.3 FFC: нормализовать снимок делением на эталон (in-place по {@code still}).
      * {@code tmpl} — уменьшенный размытый шаблон неравномерности освещения.
+     * @return false — коррекция не выполнена (снимок не изменён).
      */
-    public native void applyFlatField(Bitmap still, Bitmap tmpl);
+    public native boolean applyFlatField(Bitmap still, Bitmap tmpl);
 
     public native void setExpoTime(int microseconds);       // экспозиция, мкс
 

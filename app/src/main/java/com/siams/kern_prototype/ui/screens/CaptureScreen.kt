@@ -152,7 +152,11 @@ fun CaptureScreen(
 
             Button(
                 onClick = vm::capture,
-                enabled = !capturing && cameraState is CameraControllerState.Ready,
+                // Ready — обычная съёмка; Error(canRetry) — снимок сначала переподключит камеру.
+                enabled = !capturing && (
+                    cameraState is CameraControllerState.Ready ||
+                        (cameraState as? CameraControllerState.Error)?.canRetry == true
+                    ),
                 shape = CircleShape,
                 colors = ButtonDefaults.buttonColors(),
                 modifier = Modifier.size(84.dp),

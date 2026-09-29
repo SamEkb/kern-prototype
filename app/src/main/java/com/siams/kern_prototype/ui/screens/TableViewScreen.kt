@@ -72,6 +72,15 @@ fun TableViewScreen(
     var overlay by remember { mutableFloatStateOf(0f) }
 
     val closed by vm.closed.collectAsStateWithLifecycle()
+    // Отказ операции (например, удаление во время отправки) — коротким сообщением.
+    val message by vm.message.collectAsStateWithLifecycle()
+    val toastContext = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(message) {
+        message?.let {
+            android.widget.Toast.makeText(toastContext, it, android.widget.Toast.LENGTH_LONG).show()
+            vm.consumeMessage()
+        }
+    }
     LaunchedEffect(closed) { if (closed) onBack() }
 
     var showEditNumber by remember { mutableStateOf(false) }

@@ -59,6 +59,15 @@ fun TablesScreen(
 ) {
     val drilling by vm.drilling.collectAsStateWithLifecycle()
     val tables by vm.tables.collectAsStateWithLifecycle()
+    // Отказ операции (например, удаление во время отправки) — коротким сообщением.
+    val message by vm.message.collectAsStateWithLifecycle()
+    val toastContext = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(message) {
+        message?.let {
+            android.widget.Toast.makeText(toastContext, it, android.widget.Toast.LENGTH_LONG).show()
+            vm.consumeMessage()
+        }
+    }
 
     Scaffold(
         topBar = {

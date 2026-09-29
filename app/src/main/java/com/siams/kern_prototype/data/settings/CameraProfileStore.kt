@@ -18,7 +18,7 @@ import javax.inject.Singleton
  * переживают перезапуск. Дефолты — [CameraProfile.defaultFor] до калибровки.
  */
 @Singleton
-class CameraProfileStore @Inject constructor(
+open class CameraProfileStore @Inject constructor(
     @ApplicationContext private val context: Context,
     private val json: Json,
 ) {
@@ -36,6 +36,13 @@ class CameraProfileStore @Inject constructor(
         }
     }
 
+    /** R11: сохранить несколько профилей одной записью DataStore — всё или ничего. */
+    open suspend fun saveAll(profiles: List<CameraProfile>) {
+        context.kernDataStore.edit { p ->
+            profiles.forEach { p[key(it.lampType)] = json.encodeToString(CameraProfile.serializer(), it) }
+        }
+    }
+
     /** Разовое чтение для CameraController при применении профиля. */
-    suspend fun read(lamp: LampType): CameraProfile = profile(lamp).first()
+    open suspend fun read(lamp: LampType): CameraProfile = profile(lamp).first()
 }

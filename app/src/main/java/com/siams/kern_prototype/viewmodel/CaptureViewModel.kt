@@ -13,6 +13,7 @@ import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
 import com.siams.kern_prototype.ui.nav.Routes
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -139,19 +140,26 @@ class CaptureViewModel @Inject constructor(
         if (_capturing.value) return
         _capturing.value = true
         viewModelScope.launch {
+            // Стол, в который идёт съёмка, фиксируется до снимка (как и раньше); null — стол
+            // создаётся лениво при фиксации кадра (R08: неудачный снимок не оставляет пустой стол).
+            val tableId = _tableId.value
+            val (layerId, file) = repository.newLayerFile(drillingId)
             try {
-                // Лениво создаём стол при первом кадре (см. _tableId).
-                var tableId = _tableId.value
-                if (tableId == null) {
-                    val t = repository.createNextTable(drillingId)
-                    tableId = t.id
-                    _tableId.value = t.id
-                    _tableNumber.value = t.number
-                }
-                val (layerId, file) = repository.newLayerFile(drillingId)
+                // R05: пересъёмка при идущей отправке — отказ ДО снимка (основная проверка — в
+                // транзакции репозитория, см. saveCapture).
+                repository.checkCanSaveCapture(tableId, _lamp.value)
                 val profile = controller.capture(file, _lamp.value)
-                repository.saveLayer(layerId, tableId, _lamp.value, file, profile)
+                val table = repository.saveCapture(drillingId, tableId, layerId, _lamp.value, file, profile)
+                if (_tableId.value == tableId) {
+                    _tableId.value = table.id
+                    _tableNumber.value = table.number
+                }
+            } catch (e: CancellationException) {
+                // Экран закрыт во время съёмки: файл удаляется, только если БД на него не ссылается.
+                repository.discardUncommittedCapture(file)
+                throw e
             } catch (t: Throwable) {
+                repository.discardUncommittedCapture(file)
                 _message.value = t.message ?: "Ошибка съёмки"
             } finally {
                 _capturing.value = false

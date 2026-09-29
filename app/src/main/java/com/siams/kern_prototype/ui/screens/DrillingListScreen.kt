@@ -62,6 +62,15 @@ fun DrillingListScreen(
 ) {
     val drillings by vm.drillings.collectAsStateWithLifecycle()
     val usedBytes by vm.usedBytes.collectAsStateWithLifecycle()
+    // Отказ/итог операции (удаление во время отправки, пропуски при очистке) — сообщением.
+    val message by vm.message.collectAsStateWithLifecycle()
+    val toastContext = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(message) {
+        message?.let {
+            android.widget.Toast.makeText(toastContext, it, android.widget.Toast.LENGTH_LONG).show()
+            vm.consumeMessage()
+        }
+    }
     var pendingDelete by remember { mutableStateOf<DrillingWithTables?>(null) }
 
     Scaffold(

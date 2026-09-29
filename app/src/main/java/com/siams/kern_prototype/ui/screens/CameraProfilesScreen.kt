@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -148,13 +149,16 @@ fun CameraProfilesScreen(
 
     // §4.2: экспорт/импорт профилей через системный выбор файла (SAF).
     val scope = rememberCoroutineScope()
+    // JSON собирается ДО выбора файла: при ошибке (пропал эталон FFC) файл не создаётся вовсе.
+    var pendingExport by remember { mutableStateOf<String?>(null) }
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
-        if (uri != null) scope.launch {
-            val jsonText = vm.buildExportJson()
+        val jsonText = pendingExport
+        pendingExport = null
+        if (uri != null && jsonText != null) scope.launch {
             val ok = runCatching {
-                context.contentResolver.openOutputStream(uri)?.use { it.write(jsonText.toByteArray()) }
+                checkNotNull(context.contentResolver.openOutputStream(uri)).use { it.write(jsonText.toByteArray()) }
             }.isSuccess
             android.widget.Toast.makeText(
                 context,
@@ -314,7 +318,22 @@ fun CameraProfilesScreen(
                 horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
             ) {
                 OutlinedButton(
-                    onClick = { exportLauncher.launch("kern_camera_profiles.json") },
+                    onClick = {
+                        scope.launch {
+                            runCatching { vm.buildExportJson() }
+                                .onSuccess {
+                                    pendingExport = it
+                                    exportLauncher.launch("kern_camera_profiles.json")
+                                }
+                                .onFailure {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        it.message ?: "Не удалось подготовить экспорт",
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                        }
+                    },
                     modifier = Modifier.weight(1f),
                 ) { Text("Экспорт") }
                 OutlinedButton(

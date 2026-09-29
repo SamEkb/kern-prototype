@@ -1,5 +1,6 @@
 package com.siams.kern_prototype.data.db.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import com.siams.kern_prototype.domain.model.SyncStatus
@@ -19,4 +20,9 @@ data class DrillingEntity(
     /** Прогресс текущей отправки: сколько столов залито из [totalTables] (§9). */
     val uploadedTables: Int = 0,
     val totalTables: Int = 0,
+    /**
+     * R01/R05: счётчик локальных правок (паспорт, столы, слои, глубины). Отправка объявляется
+     * успешной (SENT) только если ревизия не изменилась с момента её начала.
+     */
+    @ColumnInfo(defaultValue = "0") val editRevision: Long = 0,
 )

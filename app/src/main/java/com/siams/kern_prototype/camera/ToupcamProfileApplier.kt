@@ -1,6 +1,5 @@
 package com.siams.kern_prototype.camera
 
-import com.droid.usbcam.CamLib
 import com.siams.kern_prototype.domain.model.CameraProfile
 import kotlin.math.ln
 import kotlin.math.roundToInt
@@ -28,7 +27,7 @@ object ToupcamProfileApplier {
     const val GAMMA_MAX = 180                     // TOUPCAM_GAMMA_MAX
     const val GAMMA_DEF = 100                     // TOUPCAM_GAMMA_DEF (1.0)
 
-    fun apply(cam: CamLib, profile: CameraProfile) {
+    internal fun apply(cam: ToupcamDevice, profile: CameraProfile) {
         // Автоэкспозиция — OFF (детерминизм, §6.2).
         cam.setAutoExpoEnable(0)
 

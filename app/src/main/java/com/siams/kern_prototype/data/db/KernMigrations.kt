@@ -1,0 +1,35 @@
+package com.siams.kern_prototype.data.db
+
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+
+/**
+ * Явные миграции схемы Room (R07). Разрушительный fallback для пользовательских данных
+ * запрещён: каждая поддерживаемая версия обновляется миграцией, иначе Room упадёт при
+ * открытии, а не удалит архив. Схемы версий — в `app/schemas` (exportSchema).
+ *
+ * Версии 1–2 существовали только в ранних сборках разработки; их схемы не сохранились,
+ * поэтому миграций для них нет: обновление такой БД останавливается без удаления данных
+ * (см. [DatabaseBackup.prepareForOpen]).
+ */
+object KernMigrations {
+
+    /**
+     * v3 → v4 (R01/R05): `layer.metaConfirmed`, `layer.staleRemoteImageId` (NULL) и
+     * `drilling.editRevision`.
+     * `editRevision` для существующих долблений — 0 (отсчёт правок начинается после обновления).
+     * `metaConfirmed` для всех существующих слоёв — 0 («не подтверждено»):
+     * статус SENT старой версии не гарантирует доставку метаданных (именно дефект R01), поэтому
+     * при следующей отправке для уже загруженных слоёв будет выполнен только PUT метаданных
+     * (идемпотентен), файлы повторно не грузятся.
+     */
+    val MIGRATION_3_4 = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE layer ADD COLUMN metaConfirmed INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE drilling ADD COLUMN editRevision INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE layer ADD COLUMN staleRemoteImageId TEXT")
+        }
+    }
+
+    val ALL: Array<Migration> = arrayOf(MIGRATION_3_4)
+}

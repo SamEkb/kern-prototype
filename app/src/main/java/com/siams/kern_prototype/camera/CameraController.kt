@@ -17,6 +17,7 @@ import android.os.HandlerThread
 import android.util.Log
 import android.util.Size
 import android.view.Surface
+import com.siams.kern_prototype.data.storage.writeAtomically
 import com.siams.kern_prototype.data.settings.CameraProfileStore
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
@@ -142,6 +143,10 @@ class CameraController @Inject constructor(
         val reader = imageReader ?: error("ImageReader не создан")
         val chars = characteristics ?: error("Нет характеристик камеры")
         val profile = currentProfile
+        // FFC реализован только для Touptek: настроенную коррекцию нельзя молча пропустить.
+        check(profile.ffcTemplatePath.isBlank()) {
+            "Коррекция FFC не поддерживается камерой телефона, а в профиле задан эталон"
+        }
 
         // Читатель: сохранить кадр в файл.
         val saved = suspendCancellableCoroutine<Unit> { cont ->
@@ -151,8 +156,7 @@ class CameraController @Inject constructor(
                     val buffer = image.planes[0].buffer
                     val bytes = ByteArray(buffer.remaining())
                     buffer.get(bytes)
-                    target.parentFile?.mkdirs()
-                    target.outputStream().use { it.write(bytes) }
+                    writeAtomically(target) { it.write(bytes); true } // R08
                     if (cont.isActive) cont.resume(Unit)
                 } catch (t: Throwable) {
                     if (cont.isActive) cont.resumeWithException(t)

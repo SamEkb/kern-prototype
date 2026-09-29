@@ -35,11 +35,24 @@ class DrillingUploader @Inject constructor(
 ) {
     /** @throws Exception при сетевой/серверной ошибке — для ретрая WorkManager. */
     suspend fun upload(drillingId: String) {
+        // R05: SENDING — ДО чтения содержимого. С этого момента репозиторий не даёт заменить
+        // снятые кадры, поэтому прочитанные ниже файлы не сменятся до конца отправки.
+        repository.setSyncStatus(drillingId, SyncStatus.SENDING, null)
         val content = repository.getDrillingContent(drillingId)
             ?: error("Долбление не найдено: $drillingId")
         val drilling = content.drilling
 
-        repository.setSyncStatus(drillingId, SyncStatus.SENDING, null)
+        // R05: на сервере остался кадр прежней версии слоя — автоматическую замену не считаем
+        // выполненной (контракт замены на S900 не согласован, R04). Ничего не отправляем.
+        content.tables.forEach { t ->
+            t.layers.firstOrNull { it.staleRemoteImageId != null }?.let {
+                error(
+                    "Стол №${t.table.number}, ${it.lampType.ruLabel}: кадр переснят во время прошлой " +
+                        "отправки, на сервере остался прежний кадр (${it.staleRemoteImageId}). " +
+                        "Автоматическая замена не выполняется.",
+                )
+            }
+        }
 
         val tables = content.tables.sortedBy { it.table.number }
         repository.setUploadProgress(drillingId, 0, tables.size)
@@ -70,7 +83,16 @@ class DrillingUploader @Inject constructor(
             repository.setUploadProgress(drillingId, index + 1, tables.size)
         }
 
-        repository.setSyncStatus(drillingId, SyncStatus.SENT, null)
+        // R01/R05: SENT — одним условным запросом (ревизия не изменилась И все слои доставлены).
+        // Иначе — ошибка попытки: UploadWorker повторит отправку (новые правки/недоставленные
+        // метаданные уйдут), а после исчерпания попыток долбление получит ERROR с этим текстом.
+        if (!repository.markSentIfComplete(drillingId, drilling.editRevision)) {
+            val undelivered = repository.countUndeliveredLayers(drillingId)
+            error(
+                if (undelivered > 0) "Отправка не завершена: не подтверждено слоёв на сервере — $undelivered"
+                else "Долбление изменено во время отправки — изменения будут отправлены повторно",
+            )
+        }
     }
 
     private suspend fun uploadTable(sourceId: String, table: TableWithLayers) {
@@ -84,6 +106,9 @@ class DrillingUploader @Inject constructor(
             // Уже залит — не перезаливаем; убеждаемся, что знаем fovIdx.
             if (layer.remoteImageId != null) {
                 if (fovIdx == null) fovIdx = findFovIdx(sourceId, layer.remoteImageId)
+                // R01: файл принят раньше, но метаданные не подтверждены (сбой PUT или правка
+                // глубин после отправки) — доставляем только PUT.
+                if (!layer.metaConfirmed) putMeta(sourceId, layer.remoteImageId, layer, table.table.stackUid)
                 continue
             }
 
@@ -93,15 +118,31 @@ class DrillingUploader @Inject constructor(
             } else {
                 parseImageId(api.uploadImageToFov(sourceId, fovIdx, part).ensureOk("upload to FoV $fovIdx"))
             }
-            repository.setRemoteImageId(layer.id, imageId)
+            // R05: id — только в ту версию слоя, файл которой загружен. Если слой переснят во
+            // время POST, ответ старой загрузки не подтверждает новый кадр: помечаем, что на
+            // сервере остался прежний кадр, и останавливаем отправку (без SENT).
+            if (!repository.bindRemoteImage(layer, imageId)) {
+                repository.markStaleUpload(layer.id, imageId)
+                error(
+                    "Стол №${table.table.number}, ${layer.lampType.ruLabel}: кадр переснят во время загрузки; " +
+                        "на сервере остался прежний кадр ($imageId). Автоматическая замена не выполняется.",
+                )
+            }
 
             if (fovIdx == null) {
                 fovIdx = findFovIdx(sourceId, imageId) ?: (fovSize(sourceId) - 1).coerceAtLeast(0)
             }
 
-            api.updateImageMeta(sourceId, imageId, metaOf(layer, table.table.stackUid))
-                .ensureSuccess("PUT image meta")
+            putMeta(sourceId, imageId, layer, table.table.stackUid)
         }
+    }
+
+    /** PUT метаданных слоя + подтверждение в Room (R01). Формат запроса не изменён. */
+    private suspend fun putMeta(sourceId: String, imageId: String, layer: LayerEntity, stackUid: String) {
+        api.updateImageMeta(sourceId, imageId, metaOf(layer, stackUid))
+            .ensureSuccess("PUT image meta")
+        // false — слой изменён во время PUT: подтверждения нет, итог отправки не станет SENT.
+        repository.confirmLayerMeta(layer, imageId)
     }
 
     // ---- helpers -----------------------------------------------------------

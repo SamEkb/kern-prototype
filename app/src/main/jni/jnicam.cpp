@@ -62,13 +62,15 @@ static void ucamCallback(unsigned nEvent, void *pCallbackCtx) {
 }
 
 // RGB24 (top-down, порядок RGB) → Bitmap ARGB_8888 (порядок в памяти R,G,B,A).
-static void pullInto(JNIEnv *env, jobject bitmap, bool still) {
-    if (!gHcam || bitmap == nullptr) return;
+// R09: true — только если в bitmap действительно скопирован НОВЫЙ кадр SDK.
+static bool pullInto(JNIEnv *env, jobject bitmap, bool still) {
+    if (!gHcam || bitmap == nullptr) return false;
     AndroidBitmapInfo info;
-    if (AndroidBitmap_getInfo(env, bitmap, &info) < 0) return;
-    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) < 0) return false;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return false;
     void *pixels = nullptr;
-    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) return;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) return false;
+    bool ok = false;
 
     const int w = (int) info.width;
     const int h = (int) info.height;
@@ -90,6 +92,7 @@ static void pullInto(JNIEnv *env, jobject bitmap, bool still) {
             LOGE("pullStillImage: PullStillImageV2 FAILED hr=0x%08x", (unsigned) hr);
         }
         if (SUCCEEDED(hr)) {
+            ok = true;
             for (int y = 0; y < h; ++y) {
                 const unsigned char *src = gRgbBuf + (size_t) y * srcStride;
                 unsigned char *dst = (unsigned char *) pixels + (size_t) y * info.stride;
@@ -101,21 +104,25 @@ static void pullInto(JNIEnv *env, jobject bitmap, bool still) {
                 }
             }
         }
+    } else if (still) {
+        LOGE("pullStillImage: нет памяти под буфер %d байт", srcStride * h);
     }
     AndroidBitmap_unlockPixels(env, bitmap);
+    return ok;
 }
 
 // FFC (§2.3): нормализация снимка делением на эталон неравномерности освещения.
 // corrected_c = clamp( raw_c * mean_c / tmpl_c ), поканально; tmpl — уменьшенный размытый
 // шаблон, сэмплируется nearest (он низкочастотный, поэтому этого достаточно). In-place по still.
-static void flatFieldCorrect(JNIEnv *env, jobject still, jobject tmpl) {
+// Возвращает false, если коррекция НЕ выполнена (снимок при этом не изменён).
+static bool flatFieldCorrect(JNIEnv *env, jobject still, jobject tmpl) {
     AndroidBitmapInfo si, ti;
-    if (AndroidBitmap_getInfo(env, still, &si) < 0 || AndroidBitmap_getInfo(env, tmpl, &ti) < 0) return;
-    if (si.format != ANDROID_BITMAP_FORMAT_RGBA_8888 || ti.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return;
-    if (ti.width == 0 || ti.height == 0) return;
+    if (AndroidBitmap_getInfo(env, still, &si) < 0 || AndroidBitmap_getInfo(env, tmpl, &ti) < 0) return false;
+    if (si.format != ANDROID_BITMAP_FORMAT_RGBA_8888 || ti.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return false;
+    if (ti.width == 0 || ti.height == 0 || si.width == 0 || si.height == 0) return false;
 
     void *tp = nullptr;
-    if (AndroidBitmap_lockPixels(env, tmpl, &tp) < 0) return;
+    if (AndroidBitmap_lockPixels(env, tmpl, &tp) < 0) return false;
     const int tw = (int) ti.width, th = (int) ti.height;
     // Средние по каналам шаблона (для сохранения общей яркости).
     double sumR = 0, sumG = 0, sumB = 0;
@@ -129,7 +136,7 @@ static void flatFieldCorrect(JNIEnv *env, jobject still, jobject tmpl) {
     const double meanR = sumR / n, meanG = sumG / n, meanB = sumB / n;
 
     void *sp = nullptr;
-    if (AndroidBitmap_lockPixels(env, still, &sp) < 0) { AndroidBitmap_unlockPixels(env, tmpl); return; }
+    if (AndroidBitmap_lockPixels(env, still, &sp) < 0) { AndroidBitmap_unlockPixels(env, tmpl); return false; }
     const int sw = (int) si.width, sh = (int) si.height;
     for (int y = 0; y < sh; ++y) {
         unsigned char *srow = (unsigned char *) sp + (size_t) y * si.stride;
@@ -151,12 +158,14 @@ static void flatFieldCorrect(JNIEnv *env, jobject still, jobject tmpl) {
     }
     AndroidBitmap_unlockPixels(env, still);
     AndroidBitmap_unlockPixels(env, tmpl);
+    return true;
 }
 
 extern "C" {
 
-JNIEXPORT void JNICALL Java_com_droid_usbcam_CamLib_applyFlatField(JNIEnv *env, jobject obj, jobject still, jobject tmpl) {
-    if (still != nullptr && tmpl != nullptr) flatFieldCorrect(env, still, tmpl);
+JNIEXPORT jboolean JNICALL Java_com_droid_usbcam_CamLib_applyFlatField(JNIEnv *env, jobject obj, jobject still, jobject tmpl) {
+    if (still == nullptr || tmpl == nullptr) return JNI_FALSE;
+    return flatFieldCorrect(env, still, tmpl) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL Java_com_droid_usbcam_CamLib_init(JNIEnv *env, jobject obj) {
@@ -244,12 +253,15 @@ JNIEXPORT void JNICALL Java_com_droid_usbcam_CamLib_pullImage(JNIEnv *env, jobje
     pullInto(env, bitmap, false);
 }
 
-JNIEXPORT void JNICALL Java_com_droid_usbcam_CamLib_pullStillImage(JNIEnv *env, jobject obj, jobject bitmap) {
-    pullInto(env, bitmap, true);
+JNIEXPORT jboolean JNICALL Java_com_droid_usbcam_CamLib_pullStillImage(JNIEnv *env, jobject obj, jobject bitmap) {
+    return pullInto(env, bitmap, true) ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT void JNICALL Java_com_droid_usbcam_CamLib_snap(JNIEnv *env, jobject obj) {
-    if (gHcam) Toupcam_Snap(gHcam, gStillIndex);
+JNIEXPORT jboolean JNICALL Java_com_droid_usbcam_CamLib_snap(JNIEnv *env, jobject obj) {
+    if (!gHcam) return JNI_FALSE;
+    HRESULT hr = Toupcam_Snap(gHcam, gStillIndex);
+    if (FAILED(hr)) LOGE("snap: Toupcam_Snap FAILED hr=0x%08x", (unsigned) hr);
+    return SUCCEEDED(hr) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL Java_com_droid_usbcam_CamLib_setAutoExpoEnable(JNIEnv *env, jobject obj, jint mode) {

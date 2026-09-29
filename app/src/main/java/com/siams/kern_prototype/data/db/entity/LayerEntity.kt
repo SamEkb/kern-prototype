@@ -1,5 +1,6 @@
 package com.siams.kern_prototype.data.db.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -37,4 +38,16 @@ data class LayerEntity(
     val kernLowerDepth: Double? = null,
     /** id SourceImage после заливки — защита от повторной отправки (§9, §13). */
     val remoteImageId: String? = null,
+    /**
+     * R01: метаданные (lampType/stackUid/coreImageType/глубины) подтверждены сервером (PUT)
+     * для текущего [remoteImageId]. Сбрасывается при новой загрузке файла и правке метаданных;
+     * при повторной отправке недоставленный PUT выполняется, а файл повторно не грузится.
+     */
+    @ColumnInfo(defaultValue = "0") val metaConfirmed: Boolean = false,
+    /**
+     * R05: id изображения, загруженного из ПРЕЖНЕЙ версии файла слоя (слой переснят, пока шёл
+     * POST). Этот кадр остался на сервере; автоматически замена не считается выполненной —
+     * пока поле задано, долбление не может получить SENT (нужен контракт замены на S900, R04).
+     */
+    val staleRemoteImageId: String? = null,
 )

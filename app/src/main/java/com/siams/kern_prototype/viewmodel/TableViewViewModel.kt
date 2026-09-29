@@ -31,14 +31,32 @@ class TableViewViewModel @Inject constructor(
     private val _closed = MutableStateFlow(false)
     val closed: StateFlow<Boolean> = _closed.asStateFlow()
 
+    // Отказ операции (например, удаление во время отправки, R05) — показывается экраном.
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message.asStateFlow()
+
+    fun consumeMessage() {
+        _message.value = null
+    }
+
     fun deleteLayer(layerId: String) {
-        viewModelScope.launch { repository.deleteLayer(layerId) }
+        viewModelScope.launch {
+            try {
+                repository.deleteLayer(layerId)
+            } catch (e: IllegalStateException) {
+                _message.value = e.message
+            }
+        }
     }
 
     fun deleteTable() {
         viewModelScope.launch {
-            repository.deleteTable(tableId)
-            _closed.value = true
+            try {
+                repository.deleteTable(tableId)
+                _closed.value = true
+            } catch (e: IllegalStateException) {
+                _message.value = e.message
+            }
         }
     }
 

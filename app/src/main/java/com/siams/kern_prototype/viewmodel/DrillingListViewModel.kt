@@ -8,8 +8,10 @@ import com.siams.kern_prototype.domain.model.SyncStatus
 import com.siams.kern_prototype.sync.SyncManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -34,8 +36,22 @@ class DrillingListViewModel @Inject constructor(
             .flowOn(Dispatchers.IO)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
 
+    // Отказ/итог операции (удаление во время отправки, пропуски при очистке) — показывается экраном.
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message.asStateFlow()
+
+    fun consumeMessage() {
+        _message.value = null
+    }
+
     fun delete(id: String) {
-        viewModelScope.launch { repository.deleteDrilling(id) }
+        viewModelScope.launch {
+            try {
+                repository.deleteDrilling(id)
+            } catch (e: IllegalStateException) {
+                _message.value = e.message
+            }
+        }
     }
 
     fun send(id: String) {
@@ -60,12 +76,17 @@ class DrillingListViewModel @Inject constructor(
         if (ids.isNotEmpty()) sendAll(ids)
     }
 
-    /** Очистить успешно отправленные (§11). */
+    /**
+     * Очистить успешно отправленные (§11). Список — лишь кандидаты: статус каждого проверяется
+     * заново в транзакции удаления; изменённые или снова отправляемые не удаляются.
+     */
     fun clearSent() {
         viewModelScope.launch {
-            drillings.value
-                .filter { it.drilling.syncStatus == SyncStatus.SENT }
-                .forEach { repository.deleteDrilling(it.drilling.id) }
+            val candidates = drillings.value.filter { it.drilling.syncStatus == SyncStatus.SENT }
+            val skipped = candidates.count { !repository.deleteDrillingIfSent(it.drilling.id) }
+            if (skipped > 0) {
+                _message.value = "Не удалено долблений: $skipped — их статус изменился (изменены или отправляются)"
+            }
         }
     }
 }

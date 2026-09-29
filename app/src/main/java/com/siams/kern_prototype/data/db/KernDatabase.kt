@@ -12,8 +12,9 @@ import com.siams.kern_prototype.data.db.entity.TableEntity
 
 @Database(
     entities = [DrillingEntity::class, TableEntity::class, LayerEntity::class],
-    version = 3,
-    exportSchema = false,
+    version = KernDatabase.VERSION,
+    // R07: схема каждой версии экспортируется в app/schemas — база для миграций и их тестов.
+    exportSchema = true,
 )
 @TypeConverters(Converters::class)
 abstract class KernDatabase : RoomDatabase() {
@@ -23,5 +24,8 @@ abstract class KernDatabase : RoomDatabase() {
 
     companion object {
         const val NAME = "kern.db"
+
+        /** При повышении — добавить миграцию в [KernMigrations.ALL] и тест в MigrationTest. */
+        const val VERSION = 4
     }
 }
