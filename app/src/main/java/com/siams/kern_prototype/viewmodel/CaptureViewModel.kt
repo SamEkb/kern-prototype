@@ -112,7 +112,8 @@ class CaptureViewModel @Inject constructor(
     }
 
     fun switchLamp(lampType: LampType) {
-        if (_lamp.value == lampType) return
+        // R10/FIXES §7: во время снимка освещение не меняется (UI тоже заблокирован).
+        if (_capturing.value || _lamp.value == lampType) return
         _lamp.value = lampType
         viewModelScope.launch {
             runCatching { controller.switchLamp(lampType) }
@@ -123,6 +124,7 @@ class CaptureViewModel @Inject constructor(
 
     /** «Новый стол» (§5.4): инкремент + авто-сброс на Дневной. Пустой стол не создаём. */
     fun newTable() {
+        if (_capturing.value) return // R10: новый стол во время снимка сменил бы освещение и стол
         viewModelScope.launch {
             if (_tableId.value == null) {
                 _message.value = "Стол №${_tableNumber.value} ещё пуст — сначала сделайте снимок."
@@ -143,13 +145,18 @@ class CaptureViewModel @Inject constructor(
             // Стол, в который идёт съёмка, фиксируется до снимка (как и раньше); null — стол
             // создаётся лениво при фиксации кадра (R08: неудачный снимок не оставляет пустой стол).
             val tableId = _tableId.value
+            // R10: освещение фиксируется в момент нажатия; контроллер снимает ровно с профилем этой
+            // лампы (применит его сам, если переключение ещё не дошло до камеры).
+            val lamp = _lamp.value
             val (layerId, file) = repository.newLayerFile(drillingId)
             try {
                 // R05: пересъёмка при идущей отправке — отказ ДО снимка (основная проверка — в
                 // транзакции репозитория, см. saveCapture).
-                repository.checkCanSaveCapture(tableId, _lamp.value)
-                val profile = controller.capture(file, _lamp.value)
-                val table = repository.saveCapture(drillingId, tableId, layerId, _lamp.value, file, profile)
+                repository.checkCanSaveCapture(tableId, lamp)
+                val profile = controller.capture(file, lamp)
+                check(profile.lampType == lamp) { "Профиль снимка не соответствует освещению" }
+                _activeProfile.value = profile
+                val table = repository.saveCapture(drillingId, tableId, layerId, lamp, file, profile)
                 if (_tableId.value == tableId) {
                     _tableId.value = table.id
                     _tableNumber.value = table.number

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Camera
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -67,6 +68,8 @@ fun CaptureScreen(
     val cameraState by vm.cameraState.collectAsStateWithLifecycle()
     val table by vm.table.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
+    // Системный «Назад» во время снимка не закрывает экран (кадр не должен потеряться).
+    androidx.activity.compose.BackHandler(enabled = capturing) {}
 
     LaunchedEffect(message) {
         message?.let {
@@ -148,7 +151,8 @@ fun CaptureScreen(
             verticalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            LampSwitch(selected = lamp, onSelect = vm::switchLamp, modifier = Modifier.fillMaxWidth())
+            // R10/FIXES §7: во время снимка освещение, новый стол и выход недоступны.
+            LampSwitch(selected = lamp, onSelect = vm::switchLamp, modifier = Modifier.fillMaxWidth(), enabled = !capturing)
 
             Button(
                 onClick = vm::capture,
@@ -161,18 +165,25 @@ fun CaptureScreen(
                 colors = ButtonDefaults.buttonColors(),
                 modifier = Modifier.size(84.dp),
             ) {
-                Icon(Icons.Outlined.Camera, contentDescription = stringResource(R.string.capture_shoot_cd), modifier = Modifier.size(36.dp))
+                if (capturing) {
+                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
+                } else {
+                    Icon(Icons.Outlined.Camera, contentDescription = stringResource(R.string.capture_shoot_cd), modifier = Modifier.size(36.dp))
+                }
+            }
+            if (capturing) {
+                Text(stringResource(R.string.capture_in_progress), style = Body3, color = Color.White)
             }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
             ) {
-                OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = onBack, enabled = !capturing, modifier = Modifier.weight(1f)) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
                     Text(stringResource(R.string.capture_done))
                 }
-                OutlinedButton(onClick = vm::newTable, modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = vm::newTable, enabled = !capturing, modifier = Modifier.weight(1f)) {
                     Icon(Icons.Outlined.Add, contentDescription = null)
                     Text(stringResource(R.string.capture_new_table))
                 }

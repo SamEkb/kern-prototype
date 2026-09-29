@@ -12,6 +12,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
@@ -32,9 +33,11 @@ fun LampSwitch(
     selected: LampType,
     onSelect: (LampType) -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     Row(
         modifier = modifier
+            .alpha(if (enabled) 1f else 0.5f)
             .height(KernTokens.minTouch)
             .clip(KernTokens.radiusPill)
             .border(1.dp, Gray50, KernTokens.radiusPill),
@@ -44,14 +47,14 @@ fun LampSwitch(
             active = selected == LampType.DAYLIGHT,
             activeBg = Blue,
             activeContent = Color.White,
-            modifier = Modifier.weight(1f).fillMaxHeight().clickable { onSelect(LampType.DAYLIGHT) },
+            modifier = Modifier.weight(1f).fillMaxHeight().clickable(enabled = enabled) { onSelect(LampType.DAYLIGHT) },
         )
         Segment(
             label = LampType.UF.ruLabel,
             active = selected == LampType.UF,
             activeBg = Gray50,
             activeContent = UvYellow,
-            modifier = Modifier.weight(1f).fillMaxHeight().clickable { onSelect(LampType.UF) },
+            modifier = Modifier.weight(1f).fillMaxHeight().clickable(enabled = enabled) { onSelect(LampType.UF) },
         )
     }
 }

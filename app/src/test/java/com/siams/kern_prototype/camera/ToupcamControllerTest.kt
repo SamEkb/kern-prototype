@@ -69,7 +69,7 @@ class ToupcamControllerTest {
 
     private fun waitCount(entry: String, n: Int, ms: Long = 3000): Boolean {
         val end = System.currentTimeMillis() + ms
-        while (System.currentTimeMillis() < end) { if (rig.log.count { it == entry } >= n) return true; Thread.sleep(5) }
+        while (System.currentTimeMillis() < end) { if (rig.snapshot().count { it == entry } >= n) return true; Thread.sleep(5) }
         return false
     }
 
@@ -136,7 +136,7 @@ class ToupcamControllerTest {
         val openB = async(Dispatchers.IO) { b.open(LampType.DAYLIGHT) }
         Thread.sleep(300)
         val firstOpened = listOf("openA1", "openB1").filter { rig.has(it) }
-        assertEquals("одновременно открыта только одна камера: ${rig.log}", 1, firstOpened.size)
+        assertEquals("одновременно открыта только одна камера: ${rig.snapshot()}", 1, firstOpened.size)
         val (first, second) = if (firstOpened.single() == "openA1") a to b else b to a
         val secondOpen = if (first === a) "openB1" else "openA1"
 
@@ -186,7 +186,7 @@ class ToupcamControllerTest {
         rig.setterGate!!.countDown()
         applying.awaitWithin()
         assertTrue(rig.waitFor("closeA1"))
-        assertTrue(rig.log.lastIndexOf("setExpoA1") < rig.indexOf("closeA1"))
+        assertTrue(rig.snapshot().lastIndexOf("setExpoA1") < rig.indexOf("closeA1"))
 
         // После освобождения настройки не доходят до хэндла.
         c.applyProfile(CameraProfile.defaultFor(LampType.DAYLIGHT))
@@ -202,7 +202,200 @@ class ToupcamControllerTest {
         val result = ae.awaitWithin()
         assertTrue(result.isFailure)
         // ae0 (выключение авто-AE) пишется и при открытии; после ae1 его быть не должно.
-        assertTrue("после release к SDK не обращаются: ${rig.log}", rig.log.lastIndexOf("ae0A1") < rig.indexOf("ae1A1"))
+        assertTrue("после release к SDK не обращаются: ${rig.snapshot()}", rig.snapshot().lastIndexOf("ae0A1") < rig.indexOf("ae1A1"))
+    }
+
+    // ---- R10: согласованность профиля и снимка -------------------------------------------
+
+    private fun expoBefore(entry: String): String? =
+        rig.snapshot().let { l -> l.subList(0, l.indexOf(entry)).lastOrNull { it.startsWith("expo") } }
+
+    @Test
+    fun captureWithOtherLampAppliesItsProfileBeforeSnap() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val uf = CameraProfile.defaultFor(LampType.UF)
+        val profile = c.capture(target(), LampType.UF)
+        assertEquals(LampType.UF, profile.lampType)
+        assertEquals("снимок — с выдержкой УФ", "expo1=${uf.exposureTimeNs / 1000}", expoBefore("snap1"))
+        assertEquals(LampType.UF, c.activeProfile.lampType)
+    }
+
+    @Test
+    fun captureRightAfterSwitchWaitsForTheSwitch() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.setterGate = CountDownLatch(1)          // переключение на УФ применяется медленно
+        val switching = async(Dispatchers.IO) { c.switchLamp(LampType.UF) }
+        assertTrue(waitCount("setExpoStart1", 2))
+        val shot = async(Dispatchers.IO) { c.capture(target(), LampType.UF) }
+        Thread.sleep(200)
+        assertFalse("Snap посреди смены профиля", rig.has("snap1"))
+        rig.setterGate!!.countDown()
+        switching.awaitWithin()
+        val profile = shot.awaitWithin()
+        assertEquals(LampType.UF, profile.lampType)
+        assertEquals("expo1=${CameraProfile.defaultFor(LampType.UF).exposureTimeNs / 1000}", expoBefore("snap1"))
+    }
+
+    @Test
+    fun lampSwitchCannotSlipBetweenApplyAndSnap() = runBlocking {
+        // Кадры редкие → снимок после применения УФ ждёт их ~0.6 с: это окно для вклинивания.
+        rig.frameIntervalMs = 300
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val ufUs = CameraProfile.defaultFor(LampType.UF).exposureTimeNs / 1000
+        val shot = async(Dispatchers.IO) { c.capture(target(), LampType.UF) }
+        assertTrue(rig.waitFor("expo1=$ufUs"))       // профиль УФ применён, Snap ещё не сделан
+        val switching = async(Dispatchers.IO) { c.switchLamp(LampType.DAYLIGHT) }
+        val profile = withTimeout(10_000) { shot.await() }
+        switching.awaitWithin()
+        assertEquals(LampType.UF, profile.lampType)
+        assertEquals("Snap — с параметрами УФ, а не вклинившегося дневного", "expo1=$ufUs", expoBefore("snap1"))
+    }
+
+    private val dayUs = CameraProfile.defaultFor(LampType.DAYLIGHT).exposureTimeNs / 1000
+    private val ufUs = CameraProfile.defaultFor(LampType.UF).exposureTimeNs / 1000
+
+    @Test
+    fun cancelledSwitchLeavesProfileUnknownAndItIsReappliedBeforeSnap() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.setterGate = CountDownLatch(1)
+        val switching = async(Dispatchers.IO) { c.switchLamp(LampType.UF) }
+        assertTrue(waitCount("setExpoStart1", 2))
+        switching.cancel()                    // отмена, пока сеттер УФ выполняется
+        rig.setterGate!!.countDown()          // сеттер всё же завершился: камера фактически на УФ
+        runCatching { switching.awaitWithin() }
+        rig.setterGate = null
+
+        c.capture(target(), LampType.DAYLIGHT)
+        assertEquals("перед дневным снимком профиль применён заново", "expo1=$dayUs", expoBefore("snap1"))
+    }
+
+    @Test
+    fun cancelledCaptureApplyAlsoInvalidatesProfile() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.setterGate = CountDownLatch(1)
+        val shot = async(Dispatchers.IO) { c.capture(target(), LampType.UF) } // доприменение УФ
+        assertTrue(waitCount("setExpoStart1", 2))
+        shot.cancel()
+        rig.setterGate!!.countDown()
+        runCatching { shot.awaitWithin() }
+        rig.setterGate = null
+
+        c.capture(target(), LampType.DAYLIGHT)
+        assertEquals("expo1=$dayUs", expoBefore("snap1"))
+    }
+
+    private fun framesBetween(from: String, to: String): Int {
+        val log = rig.snapshot()
+        val a = log.lastIndexOf(from)
+        val b = log.indexOf(to)
+        return log.subList(a, b).count { it == "frame1" }
+    }
+
+    @Test
+    fun snapWaitsForFramesEvenAfterRegularSwitch() = runBlocking {
+        rig.logFrames = true
+        rig.frameIntervalMs = 100
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        c.switchLamp(LampType.UF)             // профиль уже совпадает с лампой снимка
+        c.capture(target(), LampType.UF)
+        assertTrue("кадры после применения до Snap: ${rig.snapshot()}", framesBetween("expo1=$ufUs", "snap1") >= 2)
+    }
+
+    @Test
+    fun framesQueuedBeforeApplyDoNotCountAsSettled() = runBlocking {
+        rig.logFrames = true
+        rig.frameIntervalMs = 1
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.setterGate = CountDownLatch(1)
+        val first = async(Dispatchers.IO) { c.applyProfile(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        assertTrue(waitCount("setExpoStart1", 2))  // очередь подключения занята сеттером
+        Thread.sleep(300)                          // кадры копятся в очереди — они ДО применения УФ
+        rig.frameIntervalMs = 200                  // после применения кадры редкие
+        val shot = async(Dispatchers.IO) { c.capture(target(), LampType.UF) }
+        rig.setterGate!!.countDown()
+        rig.setterGate = null
+        first.awaitWithin()
+        shot.awaitWithin()
+        assertTrue("кадры, пришедшие до применения, не засчитаны: ${framesBetween("expo1=$ufUs", "snap1")}",
+            framesBetween("expo1=$ufUs", "snap1") >= 2)
+    }
+
+    @Test
+    fun framesArrivingDuringSettersDoNotCountAsSettled() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.previewFrames = false                  // дальше кадры только вручную
+        rig.setterGate = CountDownLatch(1)         // 1) сеттер применяемого УФ задержан
+        val shot = async(Dispatchers.IO) { runCatching { c.capture(target(), LampType.UF) } }
+        assertTrue(waitCount("setExpoStart1", 2))
+        val device = rig.devices[0]
+        repeat(2) { device.listener!!(ToupcamController.EVENT_IMAGE) } // 2) два кадра во время сеттера
+        rig.setterGate!!.countDown()               // 3) кадров больше нет, сеттер освобождён
+        rig.setterGate = null
+        val result = withTimeout(10_000) { shot.await() } // 4) УФ-снимок
+        assertTrue("ожидался отказ по таймауту", result.isFailure)
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("не подтвердила новые параметры"))
+        assertFalse("Snap по кадрам, пришедшим до завершения применения", rig.has("snap1"))
+    }
+
+    @Test
+    fun missingPreviewFramesFailCaptureInsteadOfSilentSnap() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.previewFrames = false             // камера не подтверждает новые параметры
+        try { c.capture(target(), LampType.UF); fail() } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("не подтвердила новые параметры"))
+        }
+        assertFalse(rig.has("snap1"))
+    }
+
+    @Test
+    fun cancelledSettleWaitIsNotSkippedByNextCapture() = runBlocking {
+        rig.logFrames = true
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.previewFrames = false
+        val shot = async(Dispatchers.IO) { runCatching { c.capture(target(), LampType.UF) } }
+        assertTrue(rig.waitFor("expo1=$ufUs"))  // УФ применён, ожидание кадров идёт
+        Thread.sleep(100)
+        shot.cancel()
+        runCatching { shot.awaitWithin() }
+
+        rig.frameIntervalMs = 100
+        rig.previewFrames = true
+        c.capture(target(), LampType.UF)       // профиль тот же — но ожидание не пропускается
+        assertTrue(framesBetween("expo1=$ufUs", "snap1") >= 2)
+    }
+
+    @Test
+    fun appliedProfileIsReportedOnlyAfterSdkSetters() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.setterGate = CountDownLatch(1)
+        val applying = async(Dispatchers.IO) { c.applyProfile(CameraProfile.defaultFor(LampType.UF)) }
+        assertTrue(waitCount("setExpoStart1", 2))
+        assertEquals("сеттеры ещё не выполнены", LampType.DAYLIGHT, c.activeProfile.lampType)
+        rig.setterGate!!.countDown()
+        applying.awaitWithin()
+        assertEquals(LampType.UF, c.activeProfile.lampType)
+    }
+
+    @Test
+    fun cancelledAutoExposureRestoresManualMode() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val ae = async(Dispatchers.IO) { c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        assertTrue(rig.waitFor("ae11"))                // авто-AE включена
+        ae.cancel()
+        runCatching { ae.awaitWithin() }
+        assertTrue("ручной режим возвращён: ${rig.snapshot()}", rig.snapshot().lastIndexOf("ae01") > rig.indexOf("ae11"))
     }
 
     // ---- п.3–5 предыдущего ревью ---------------------------------------------------------
@@ -232,7 +425,7 @@ class ToupcamControllerTest {
         Thread.sleep(200)
         assertTrue(rig.indexOf("pullEndA1") < rig.indexOf("closeA1"))
         assertTrue(rig.indexOf("closeA1") < rig.indexOf("openB1"))
-        assertFalse("освобождённый контроллер переподключился: ${rig.log}", rig.has("accessA2"))
+        assertFalse("освобождённый контроллер переподключился: ${rig.snapshot()}", rig.has("accessA2"))
         assertTrue(c2.state.value is CameraControllerState.Ready)
     }
 
@@ -288,7 +481,7 @@ class ToupcamControllerTest {
         rig.pullGate = null // новые чтения не задерживаются; первое всё ещё ждёт gate
         val next = async(Dispatchers.IO) { c.capture(target(), LampType.DAYLIGHT) }
         Thread.sleep(300)
-        assertEquals("второй Snap на старом подключении недопустим", 1, rig.log.count { it == "snap1" })
+        assertEquals("второй Snap на старом подключении недопустим", 1, rig.snapshot().count { it == "snap1" })
         assertFalse("переподключение до завершения чтения", rig.has("open2"))
 
         gate.countDown()

@@ -14,6 +14,7 @@ import com.siams.kern_prototype.domain.model.LampType
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -21,7 +22,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import javax.inject.Inject
 import kotlin.math.pow
@@ -67,9 +71,42 @@ class ToupcamController internal constructor(
     private val _state = MutableStateFlow<CameraControllerState>(CameraControllerState.Idle)
     override val state: StateFlow<CameraControllerState> = _state.asStateFlow()
 
+    /** Желаемый профиль (применяется при подключении/переподключении). */
     @Volatile
     private var currentProfile: CameraProfile = CameraProfile.defaultFor(LampType.DAYLIGHT)
-    override val activeProfile: CameraProfile get() = currentProfile
+
+    /**
+     * R10: профиль, применённый к текущему подключению, и граница применения ([Applied.boundary]):
+     * номер поступления последнего события на момент сразу после сеттеров. Засчитываются только
+     * кадры, поступившие позже, — пришедшие во время сеттеров не в счёт.
+     * Сбрасывается в null ДО вызова сеттеров и выставляется в той же задаче очереди сразу после
+     * их успешного завершения (параметры уже в камере): ошибка сеттера оставляет null
+     * («неизвестно») — перед снимком профиль будет применён заново. «Применён» ≠ «готов к
+     * снимку»: см. [awaitSettled].
+     * Оговорка: это завершение вызовов обёртки; принятие параметров SDK (HRESULT/readback) — R14.
+     */
+    private class Applied(val profile: CameraProfile, val boundary: Long) {
+        /** Кадры превью, ПОСТУПИВШИЕ после [boundary] (считаются в очереди подключения). */
+        val framesAfter = java.util.concurrent.atomic.AtomicInteger(0)
+    }
+
+    @Volatile
+    private var applied: Applied? = null
+        set(value) {
+            field = value
+            if (value != null) lastConfirmed = value.profile
+        }
+
+    /** Последний подтверждённо применённый профиль — для отображения (HUD, редактор). */
+    @Volatile
+    private var lastConfirmed: CameraProfile? = null
+    override val activeProfile: CameraProfile get() = applied?.profile ?: lastConfirmed ?: currentProfile
+
+    /**
+     * R10/R13: операции с параметрами и снимком (применение профиля, переключение лампы, снимок,
+     * эталон FFC, AE, AWB) выполняются строго по одной — снимок не может пройти посреди смены профиля.
+     */
+    private val opLock = Mutex()
 
     // Текущее подключение (null — не подключено): владелец хэндла SDK и его очередь операций.
     @Volatile private var connection: CameraConnection? = null
@@ -116,18 +153,16 @@ class ToupcamController internal constructor(
      */
     private suspend fun connect(profile: CameraProfile) {
         var generation = 0L
-        val conn = CameraConnection.open(deviceFactory(), shutdownWaitMs) { dev, event ->
-            onSdkEvent(dev, event, generation)
+        val conn = CameraConnection.open(deviceFactory(), shutdownWaitMs) { dev, event, seq ->
+            onSdkEvent(dev, event, generation, seq)
         }
         generation = stillGate.startConnection() // события начнутся только после open() устройства
         connection = conn
         try {
             check(!released) { "Камера освобождена" } // release() до записи поля — см. выше
             conn.connect()                             // USB-доступ → открыть → поток кадров
-            conn.run { dev ->
-                readSizes(dev)
-                ToupcamProfileApplier.apply(dev, profile)
-            }
+            conn.run { dev -> readSizes(dev) }
+            applyToConnection(conn, profile)
             previewBitmap = Bitmap.createBitmap(previewSize.width, previewSize.height, Bitmap.Config.ARGB_8888)
             // release() пришёл, пока шло подключение, — подключение уже закрывается.
             check(!released && connection === conn && !conn.isClosed) { "Камера освобождена" }
@@ -180,18 +215,70 @@ class ToupcamController internal constructor(
         previewSurface = surface
     }
 
-    override suspend fun applyProfile(profile: CameraProfile) {
+    override suspend fun applyProfile(profile: CameraProfile) = opLock.withLock { applyLocked(profile) }
+
+    override suspend fun switchLamp(lampType: LampType) = opLock.withLock { applyLocked(profileStore.read(lampType)) }
+
+    /** Применить профиль (под [opLock]). */
+    private suspend fun applyLocked(profile: CameraProfile) {
         currentProfile = profile
         val conn = connection ?: return
         try {
-            conn.run { ToupcamProfileApplier.apply(it, profile) }
+            applyToConnection(conn, profile)
         } catch (e: IllegalStateException) {
             if (!conn.isClosed) throw e // камера освобождена — применять некуда (как раньше без камеры)
         }
     }
 
-    override suspend fun switchLamp(lampType: LampType) {
-        applyProfile(profileStore.read(lampType))
+    /**
+     * Единственный путь смены параметров камеры: [applied] сбрасывается ДО сеттеров и выставляется
+     * только после их успешного выполнения ([block] — сеттеры; возвращает применённый профиль).
+     */
+    private suspend fun applyToConnection(
+        conn: CameraConnection,
+        profile: CameraProfile,
+        block: (ToupcamDevice) -> CameraProfile = { dev -> ToupcamProfileApplier.apply(dev, profile); profile },
+    ): CameraProfile {
+        applied = null
+        return conn.run { dev ->
+            val result = block(dev)
+            // Сеттеры выполнены: граница — после них; события, поступившие во время сеттеров, раньше неё.
+            applied = Applied(result, conn.arrivalBoundary())
+            result
+        }
+    }
+
+    /**
+     * R10: снимок делается ровно с профилем лампы [lampType] и только когда он ГОТОВ: применён (при
+     * неизвестном исходе прошлого применения — применяется заново) и после его сеттеров пришло
+     * [SETTLE_FRAMES] кадров превью. Возвращает применённый профиль.
+     */
+    private suspend fun ensureLampApplied(conn: CameraConnection, lampType: LampType): CameraProfile {
+        val current = applied?.takeIf { it.profile.lampType == lampType }
+        val ready = current ?: run {
+            val profile = profileStore.read(lampType)
+            currentProfile = profile
+            applyToConnection(conn, profile)
+            applied ?: error("Профиль не применён")
+        }
+        awaitSettled(ready)
+        return ready.profile
+    }
+
+    /**
+     * Дождаться [SETTLE_FRAMES] кадров превью после применения [a]. Не дождались за
+     * [SETTLE_TIMEOUT_MS] — ошибка: снимать с неподтверждёнными параметрами нельзя.
+     * Состояние ожидания хранится с применением — отменённое ожидание продолжится при следующем снимке.
+     */
+    private suspend fun awaitSettled(a: Applied) {
+        val ok = withTimeoutOrNull(SETTLE_TIMEOUT_MS) {
+            while (a.framesAfter.get() < SETTLE_FRAMES) delay(FRAME_POLL_MS)
+        }
+        if (ok == null) {
+            throw IllegalStateException(
+                "Камера не подтвердила новые параметры (нет кадров превью ${SETTLE_TIMEOUT_MS / 1000} с) — снимок не выполнен",
+            )
+        }
     }
 
 
@@ -201,25 +288,34 @@ class ToupcamController internal constructor(
      * выдержку. Даём авто сойтись, читаем выдержку/усиление, ЗАМОРАЖИВАЕМ авто (детерминизм,
      * §6.2) и возвращаем профиль с подставленными значениями.
      */
-    override suspend fun autoExposure(current: CameraProfile): CameraProfile {
-        val conn = connection ?: return current
-        // Вызовы SDK и их порядок — прежние; каждый шаг — в очереди подключения.
-        conn.run { cam ->
-            cam.setMaxAutoExpoTimeAGain(AE_MAX_TIME_US, AE_MAX_GAIN_PERCENT)
-            cam.setAutoExpoEnable(1)           // включить авто-AE
+    override suspend fun autoExposure(current: CameraProfile): CameraProfile = opLock.withLock {
+        val conn = connection ?: return@withLock current
+        var done = false
+        try {
+            // Вызовы SDK и их порядок — прежние; каждый шаг — в очереди подключения.
+            applied = null                     // авто-режим: параметры камеры меняются сами
+            conn.run { cam ->
+                cam.setMaxAutoExpoTimeAGain(AE_MAX_TIME_US, AE_MAX_GAIN_PERCENT)
+                cam.setAutoExpoEnable(1)       // включить авто-AE
+            }
+            delay(AE_CONVERGE_MS)              // дать сойтись (~кадры на нашем fps)
+            val updated = applyToConnection(conn, current) { cam ->
+                val us = cam.getExpoTime()
+                val gainPct = cam.getExpoAGain()
+                cam.setAutoExpoEnable(0)       // заморозить — дальше только ручное
+                current.copy(
+                    exposureTimeNs = us.toLong() * 1_000L,
+                    iso = gainPct,
+                ).also { ToupcamProfileApplier.apply(cam, it) }
+            }
+            done = true
+            currentProfile = updated
+            updated
+        } finally {
+            // R13: отмена/ошибка посреди AE не оставляет камеру в авто-режиме — возвращаем ручной
+            // режим с прежним профилем (applier выключает авто-AE).
+            if (!done) restoreManual(conn, current)
         }
-        delay(AE_CONVERGE_MS)                  // дать сойтись (~кадры на нашем fps)
-        val updated = conn.run { cam ->
-            val us = cam.getExpoTime()
-            val gainPct = cam.getExpoAGain()
-            cam.setAutoExpoEnable(0)           // заморозить — дальше только ручное
-            current.copy(
-                exposureTimeNs = us.toLong() * 1_000L,
-                iso = gainPct,
-            ).also { ToupcamProfileApplier.apply(cam, it) }
-        }
-        currentProfile = updated
-        return updated
     }
 
     /**
@@ -227,38 +323,51 @@ class ToupcamController internal constructor(
      * читаем поканальные усиления и переводим их в множители профиля (обратно к
      * [ToupcamProfileApplier.toWbGain]: multiplier = 2^(gain/64)). Зелёный — опорный (1.0).
      */
-    override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile {
-        val conn = connection ?: return current
-        conn.run { it.awbOnce() }
-        delay(AWB_SETTLE_MS)
-        val updated = conn.run { cam ->
-            val g = cam.getWhiteBalanceGain()  // [R, G, B], знаковые (-127..127)
-            val red = 2.0.pow((g.getOrElse(0) { 0 }) / 64.0).toFloat()
-            val blue = 2.0.pow((g.getOrElse(2) { 0 }) / 64.0).toFloat()
-            current.copy(
-                wbRedGain = red,
-                wbGreenEvenGain = 1f,
-                wbGreenOddGain = 1f,
-                wbBlueGain = blue,
-            ).also { ToupcamProfileApplier.apply(cam, it) }
+    override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile = opLock.withLock {
+        val conn = connection ?: return@withLock current
+        var done = false
+        try {
+            applied = null                     // one-push AWB меняет баланс белого сам
+            conn.run { it.awbOnce() }
+            delay(AWB_SETTLE_MS)
+            val updated = applyToConnection(conn, current) { cam ->
+                val g = cam.getWhiteBalanceGain()  // [R, G, B], знаковые (-127..127)
+                val red = 2.0.pow((g.getOrElse(0) { 0 }) / 64.0).toFloat()
+                val blue = 2.0.pow((g.getOrElse(2) { 0 }) / 64.0).toFloat()
+                current.copy(
+                    wbRedGain = red,
+                    wbGreenEvenGain = 1f,
+                    wbGreenOddGain = 1f,
+                    wbBlueGain = blue,
+                ).also { ToupcamProfileApplier.apply(cam, it) }
+            }
+            done = true
+            currentProfile = updated
+            updated
+        } finally {
+            if (!done) restoreManual(conn, current)
         }
-        currentProfile = updated
-        return updated
+    }
+
+    /** R13: вернуть ручной режим и прежний профиль после прерванной авто-процедуры (не отменяется). */
+    private suspend fun restoreManual(conn: CameraConnection, profile: CameraProfile) = withContext(NonCancellable) {
+        runCatching { applyToConnection(conn, profile) }
+            .onFailure { Log.w(TAG, "Не удалось вернуть ручной режим: ${it.message}") }
     }
 
 
-    override suspend fun capture(target: File, lampType: LampType): CameraProfile {
-        val profile = currentProfile
+    override suspend fun capture(target: File, lampType: LampType): CameraProfile = opLock.withLock {
         withContext(Dispatchers.IO) {
             val conn = connectionForSnap()
+            val profile = ensureLampApplied(conn, lampType) // R10: снимок — с профилем именно этой лампы
             val still = snapStillBlocking(conn)
             applyFfcIfConfigured(conn, still, profile) // §2.3: нормализация делением на эталон
             // R09: неудачный compress — ошибка съёмки; R08: файл появляется целиком или никак.
             writeAtomically(target) { out ->
                 still.compress(Bitmap.CompressFormat.JPEG, profile.jpegQuality.coerceIn(1, 100), out)
             }
+            profile
         }
-        return profile
     }
 
     /**
@@ -266,8 +375,14 @@ class ToupcamController internal constructor(
      * уменьшаем (усреднение уже подавляет пыль) и слегка размываем — получаем шаблон
      * неравномерности; сохраняем PNG рядом в filesDir (свой на профиль). Путь пишем в профиль.
      */
-    override suspend fun captureFfcReference(lampType: LampType): String = withContext(Dispatchers.IO) {
-        val still = snapStillBlocking(connectionForSnap())
+    override suspend fun captureFfcReference(lampType: LampType): String = opLock.withLock {
+        withContext(Dispatchers.IO) { captureFfcLocked(lampType) }
+    }
+
+    private suspend fun captureFfcLocked(lampType: LampType): String {
+        val conn = connectionForSnap()
+        ensureLampApplied(conn, lampType) // эталон — с профилем этой лампы (в редакторе — рабочим)
+        val still = snapStillBlocking(conn)
         val h = (FFC_TEMPLATE_WIDTH.toLong() * still.height / still.width).toInt().coerceAtLeast(1)
         val small = Bitmap.createScaledBitmap(still, FFC_TEMPLATE_WIDTH, h, true)
         val template = boxBlur(small, FFC_BLUR_RADIUS, FFC_BLUR_PASSES)
@@ -280,7 +395,7 @@ class ToupcamController internal constructor(
         synchronized(this@ToupcamController) {
             cachedTemplate = template; cachedTemplatePath = file.absolutePath
         }
-        file.absolutePath
+        return file.absolutePath
     }
 
     /**
@@ -411,7 +526,7 @@ class ToupcamController internal constructor(
 
     // ---- События SDK (очередь CameraConnection подключения) ---------------------
 
-    private fun onSdkEvent(dev: ToupcamDevice, event: Int, generation: Long) {
+    private fun onSdkEvent(dev: ToupcamDevice, event: Int, generation: Long, seq: Long) {
         // Событие прежнего подключения — не относится к текущей камере.
         if (generation != stillGate.currentGeneration()) {
             Log.w(TAG, "Событие 0x${Integer.toHexString(event)} прежнего подключения — проигнорировано")
@@ -420,6 +535,8 @@ class ToupcamController internal constructor(
         when (event) {
             EVENT_IMAGE -> {
                 frameEvents++
+                // R10: кадр засчитывается применению, только если поступил после его границы.
+                applied?.let { if (seq > it.boundary) it.framesAfter.incrementAndGet() }
                 val surface = previewSurface
                 if (surface == null) {
                     if (frameEvents == 1L || frameEvents % 30 == 0L) {
@@ -510,6 +627,7 @@ class ToupcamController internal constructor(
         var preview: Bitmap? = null
         if (connection === conn) {
             stillGate.fail(IllegalStateException("Камера освобождена"))
+            applied = null
             preview = previewBitmap
             connection = null
             previewSurface = null
@@ -533,6 +651,11 @@ class ToupcamController internal constructor(
         internal const val EVENT_DISCONNECTED = 0x0081
 
         internal const val SNAP_TIMEOUT_MS = 15_000L
+
+        // R10: после смены параметров перед снимком ждём кадры превью (проверить на камере).
+        private const val SETTLE_FRAMES = 2
+        private const val SETTLE_TIMEOUT_MS = 2_000L
+        private const val FRAME_POLL_MS = 20L
 
         /** Сколько ждать завершения обработчика прежнего подключения перед новым (п.3). */
         internal const val SHUTDOWN_WAIT_MS = 10_000L

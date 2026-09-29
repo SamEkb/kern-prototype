@@ -24,12 +24,19 @@ internal class FakeCameraRig {
     @Volatile var snapGate: CountDownLatch? = null
     @Volatile var setterGate: CountDownLatch? = null
     @Volatile var pullGate: CountDownLatch? = null
+    /** Кадры превью (EVENT_IMAGE) идут, как у живой камеры; false — поток кадров остановлен. */
+    @Volatile var previewFrames = true
+    @Volatile var frameIntervalMs = 20L
+    /** Записывать отправку каждого кадра в журнал («frame<id>»). */
+    @Volatile var logFrames = false
 
     /** Сколько вызовов хэндла выполняется прямо сейчас (во всех устройствах). */
     val inHandle = AtomicInteger(0)
     /** Открытое сейчас устройство (владелец глобального хэндла). */
     @Volatile var openDevice: String? = null
 
+    /** Снимок журнала (перебирать живой журнал нельзя — его дописывают потоки устройства). */
+    fun snapshot(): List<String> = synchronized(log) { log.toList() }
     fun has(entry: String) = log.contains(entry)
     fun indexOf(entry: String) = log.indexOf(entry)
     fun waitFor(entry: String, ms: Long = 3000): Boolean {
@@ -72,6 +79,16 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
         this.listener = listener
         originalListener = listener
         rig.log += "open$id"
+        thread(isDaemon = true) {
+            while (!closed) {
+                if (rig.previewFrames) {
+                    if (rig.logFrames) rig.log += "frame$id"
+                    this.listener?.invoke(ToupcamController.EVENT_IMAGE)
+                }
+                Thread.sleep(rig.frameIntervalMs)
+            }
+        }
+        Unit
     }
 
     override fun detachListener() { listener = null }
@@ -107,6 +124,7 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
 
     override fun setAutoExpoEnable(mode: Int) = handle("setAutoExpoEnable") { rig.log += "ae$mode$id" }
     override fun setExpoTime(microseconds: Int) = handle("setExpoTime") {
+        rig.log += "expo$id=$microseconds"
         rig.log += "setExpoStart$id"
         rig.setterGate?.await(5, TimeUnit.SECONDS)
         rig.log += "setExpo$id"

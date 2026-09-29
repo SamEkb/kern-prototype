@@ -26,7 +26,7 @@ class CameraConnectionTest {
 
     /** Следующее подключение открывается (разрешение свободно) и корректно закрывается. */
     private suspend fun assertOwnershipFree() {
-        val conn = CameraConnection.open(device(), 1_000) { _, _ -> }
+        val conn = CameraConnection.open(device(), 1_000) { _, _, _ -> }
         conn.close().let { withTimeout(2_000) { it.await() } }
     }
 
@@ -35,7 +35,7 @@ class CameraConnectionTest {
         // Разрешение получено, но таймаут ожидания срабатывает до выхода из блока.
         CameraConnection.afterAcquireForTest = { kotlinx.coroutines.delay(500) }
         try {
-            CameraConnection.open(device(), 100) { _, _ -> }
+            CameraConnection.open(device(), 100) { _, _, _ -> }
             fail("ожидался отказ по таймауту")
         } catch (e: IllegalStateException) {
             assertTrue(e.message!!.contains("занята"))
@@ -48,7 +48,7 @@ class CameraConnectionTest {
     fun callerCancellationAfterAcquireReturnsPermit() = runBlocking {
         val acquired = CompletableDeferred<Unit>()
         CameraConnection.afterAcquireForTest = { acquired.complete(Unit); awaitCancellation() }
-        val opening = async(Dispatchers.IO) { CameraConnection.open(device(), 10_000) { _, _ -> } }
+        val opening = async(Dispatchers.IO) { CameraConnection.open(device(), 10_000) { _, _, _ -> } }
         withTimeout(2_000) { acquired.await() }
         opening.cancel()
         try { opening.await(); fail() } catch (_: CancellationException) {}
@@ -58,9 +58,9 @@ class CameraConnectionTest {
 
     @Test
     fun busyWhileOwnedThenFreeAfterClose() = runBlocking {
-        val first = CameraConnection.open(device(), 1_000) { _, _ -> }
+        val first = CameraConnection.open(device(), 1_000) { _, _, _ -> }
         try {
-            CameraConnection.open(device(), 100) { _, _ -> }
+            CameraConnection.open(device(), 100) { _, _, _ -> }
             fail("пока первое подключение не закрыто, второе невозможно")
         } catch (e: IllegalStateException) {
             assertTrue(e.message!!.contains("занята"))

@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal class CameraConnection private constructor(
     val device: ToupcamDevice,
-    private val onEvent: (ToupcamDevice, Int) -> Unit,
+    private val onEvent: (ToupcamDevice, Int, Long) -> Unit,
 ) {
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "toupcam-connection") }
     private val dispatcher = executor.asCoroutineDispatcher()
@@ -44,11 +44,24 @@ internal class CameraConnection private constructor(
     /** true после [close] — операции с хэндлом больше не выполняются. */
     val isClosed: Boolean get() = closing.get()
 
-    /** Событие SDK (поток SDK, не блокирует). После [close] — отбрасывается, как и ещё не начатые. */
+    /** Номер последнего события, ПОСТУПИВШЕГО в очередь (присваивается в момент поступления). */
+    private val arrivals = java.util.concurrent.atomic.AtomicLong(0)
+
+    /**
+     * Граница «после этого момента»: номер последнего поступившего события. Событие с номером
+     * больше границы поступило в очередь позже её фиксации.
+     */
+    fun arrivalBoundary(): Long = arrivals.get()
+
+    /**
+     * Событие SDK (поток SDK, не блокирует). Номер поступления присваивается здесь, до очереди.
+     * После [close] — отбрасывается, как и ещё не начатые.
+     */
     fun post(event: Int) {
         if (closing.get()) return
+        val seq = arrivals.incrementAndGet()
         try {
-            executor.execute { if (!closing.get()) onEvent(device, event) }
+            executor.execute { if (!closing.get()) onEvent(device, event, seq) }
         } catch (_: RejectedExecutionException) {
         }
     }
@@ -130,7 +143,7 @@ internal class CameraConnection private constructor(
         suspend fun open(
             device: ToupcamDevice,
             timeoutMs: Long,
-            onEvent: (ToupcamDevice, Int) -> Unit,
+            onEvent: (ToupcamDevice, Int, Long) -> Unit,
         ): CameraConnection {
             // Разрешение, полученное до неуспешного выхода, обязательно возвращается. Отмена или
             // таймаут могут сработать уже ПОСЛЕ acquire(), на выходе из withTimeout (граница
