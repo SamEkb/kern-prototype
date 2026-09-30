@@ -41,6 +41,10 @@ class KernRepository @Inject constructor(
     private val passportCodec: PassportCodec,
     private val json: Json,
 ) {
+    /** R21: источник метрик памяти для замера сохранения слоя (подменяется в тестах). */
+    internal var memoryReader: com.siams.kern_prototype.camera.MemoryReader =
+        com.siams.kern_prototype.camera.MemoryReader.System
+
     // ---- Долбления ---------------------------------------------------------
 
     fun observeDrillings(): Flow<List<DrillingWithTables>> = drillingDao.observeAllWithTables()
@@ -193,18 +197,30 @@ class KernRepository @Inject constructor(
         audit: com.siams.kern_prototype.camera.CaptureAudit? = null,
     ): TableEntity {
         // R02/R08: кадр целый (полное декодирование) — и его контрольная сумма для сверки перед отправкой.
-        val sha256 = withContext(Dispatchers.IO) {
-            fileStorage.jpegProblem(file)?.let { error("Снимок записан с ошибкой ($it) — повторите съёмку") }
-            fileStorage.sha256(file)
-        }
         // Миниатюра для быстрых превью (§11); при ошибке — используем оригинал.
-        // Декодирование JPEG — на IO, чтобы не блокировать UI-поток (защита от ANR).
-        val thumb = fileStorage.thumbFileFor(file)
-        val thumbPath = withContext(Dispatchers.IO) {
-            if (fileStorage.writeThumbnail(file, thumb)) thumb.absolutePath else null
+        // R21: замер памяти сохранения (только для снимков с аудитом — камера Touptek). Весь цикл
+        // замера (создание, отметки, завершение) — здесь же на IO: чтение метрик и остановка опроса
+        // не выполняются в потоке вызывающего (главном); завершение — в finally, в т.ч. при отмене.
+        val prepared = withContext(Dispatchers.IO) {
+            val probe = audit?.let { com.siams.kern_prototype.camera.MemoryProbe("save-layer", memoryReader) }
+            var outcome = "error"
+            try {
+                fileStorage.jpegProblem(file)?.let { error("Снимок записан с ошибкой ($it) — повторите съёмку") }
+                probe?.mark("validated")
+                val sha = fileStorage.sha256(file)
+                probe?.mark("sha256")
+                val thumb = fileStorage.thumbFileFor(file)
+                val thumbPath = if (fileStorage.writeThumbnail(file, thumb)) thumb.absolutePath else null
+                outcome = "ok"
+                PreparedLayerFiles(sha, thumbPath, probe?.finish(outcome))
+            } finally {
+                probe?.finish(outcome)
+            }
         }
+        val sha256 = prepared.sha256
+        val thumbPath = prepared.thumbPath
         val profileJson = json.encodeToString(CameraProfile.serializer(), profile)
-        val auditJson = audit?.let { json.encodeToString(com.siams.kern_prototype.camera.CaptureAudit.serializer(), it) }
+        val auditJson = audit?.copy(saveMemory = prepared.memory)?.let { json.encodeToString(com.siams.kern_prototype.camera.CaptureAudit.serializer(), it) }
         // Заполняются в конце тела транзакции. Исключение из withTransaction (в т.ч. отмена
         // корутины) НЕ доказывает откат: commit мог состояться до доставки результата.
         var table: TableEntity? = null
@@ -442,3 +458,10 @@ class KernRepository @Inject constructor(
 
     fun usedBytes(): Long = fileStorage.usedBytes()
 }
+
+/** Результат подготовки файлов слоя перед записью в БД (R21: с замером памяти). */
+private class PreparedLayerFiles(
+    val sha256: String,
+    val thumbPath: String?,
+    val memory: com.siams.kern_prototype.camera.MemoryTrace?,
+)

@@ -18,6 +18,10 @@ data class CaptureAudit(
     val applied: ToupcamProfileApplier.ApplyReport?,
     val limits: CameraLimits,
     val readback: CameraReadback?,
+    /** R21: замер памяти операции снимка (null — не измерялось). */
+    val memory: MemoryTrace? = null,
+    /** R21: замер памяти сохранения слоя (проверка JPEG, SHA-256, миниатюра). */
+    val saveMemory: MemoryTrace? = null,
     val note: String = "readback — состояние SDK около снимка, не доказанные параметры кадра",
 ) {
     /** Запрос в единицах профиля. */

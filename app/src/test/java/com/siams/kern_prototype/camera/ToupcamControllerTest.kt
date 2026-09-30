@@ -39,6 +39,15 @@ class ToupcamControllerTest {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
     private val rig = FakeCameraRig()
     private val controllers = mutableListOf<ToupcamController>()
+    /** R21: метрики памяти — детерминированные (реальный Debug в Robolectric не показателен). */
+    private val memory = object : MemoryReader {
+        override fun javaUsedBytes() = 1L
+        override fun javaMaxBytes() = 2L
+        override fun nativeAllocatedBytes() = 3L
+        override fun pssKb() = 4L
+    }
+
+    private fun probeThreadsAlive() = Thread.getAllStackTraces().keys.count { it.name == "memory-probe" && it.isAlive }
 
     /** Устройства контроллера именуются «<prefix><n>»: подключения разных контроллеров различимы. */
     private fun controller(prefix: String = ""): ToupcamController {
@@ -46,7 +55,7 @@ class ToupcamControllerTest {
         return ToupcamController(
             context, CameraProfileStore(context, json),
             { FakeToupcamDevice(rig, prefix + (++n)).also { rig.devices += it } },
-            snapTimeoutMs = 300, shutdownWaitMs = 5_000,
+            snapTimeoutMs = 300, shutdownWaitMs = 5_000, memoryReader = memory,
         ).also { controllers += it }
     }
 
@@ -625,6 +634,45 @@ class ToupcamControllerTest {
         val rb = audit.readback!!
         assertEquals("состояние SDK около снимка", 800, rb.gainPercent)
         assertEquals(null, rb.wbGain) // SDK не сообщил WB — «неизвестно», а не ноль
+    }
+
+    @Test
+    fun captureAuditCarriesMemoryPhasesAndBufferSizes() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val mem = c.capture(target(), LampType.DAYLIGHT).audit!!.memory!!
+        assertEquals("capture", mem.operation)
+        assertEquals(listOf("start", "applied", "pulled", "end:ok"), mem.phases.map { it.name })
+        assertEquals(3L, mem.peakNativeBytes)
+        assertEquals(4L * 1024, mem.peakPssBytes)
+        assertEquals("Bitmap снимка 8×6 ARGB", 8L * 6 * 4, mem.buffers["stillBitmap"])
+        assertEquals("RGB24, строки по 4 байта", 24L * 6, mem.buffers["rgb24FrameBytes"])
+        assertEquals(0, probeThreadsAlive())
+    }
+
+    @Test
+    fun nativeBufferEstimateUsesSdkRowAlignment() = runBlocking {
+        rig.stillWH = intArrayOf(5, 3)        // 5×3 байта = 15 → строка RGB24 выровнена до 16
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val mem = c.capture(target(), LampType.DAYLIGHT).audit!!.memory!!
+        assertEquals(16L * 3, mem.buffers["rgb24FrameBytes"])
+        assertEquals(5L * 3 * 4, mem.buffers["stillBitmap"])
+    }
+
+    @Test
+    fun failedCaptureAndFfcReferenceStopTheirProbes() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.autoStill = false                 // снимок не придёт → ошибка по таймауту
+        try { c.capture(target(), LampType.DAYLIGHT); fail() } catch (_: IllegalStateException) {}
+        assertEquals("опрос памяти не остаётся после ошибки", 0, probeThreadsAlive())
+
+        rig.autoStill = true
+        c.captureFfcReference(LampType.DAYLIGHT)
+        val ffc = c.lastFfcMemory!!
+        assertEquals(listOf("start", "applied", "pulled", "template", "end:ok"), ffc.phases.map { it.name })
+        assertEquals(0, probeThreadsAlive())
     }
 
     @Test

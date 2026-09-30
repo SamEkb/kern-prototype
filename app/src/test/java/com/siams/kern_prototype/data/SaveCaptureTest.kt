@@ -9,7 +9,12 @@ import com.siams.kern_prototype.data.storage.writeAtomically
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
 import com.siams.kern_prototype.TestJpeg
+import com.siams.kern_prototype.camera.MemoryReader
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -27,6 +32,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** R08: новый кадр фиксируется до удаления прежнего; неудачный кадр ничего не портит. */
 @RunWith(RobolectricTestRunner::class)
@@ -180,8 +188,103 @@ class SaveCaptureTest {
         val table = repo.saveCapture(d, null, id, LampType.DAYLIGHT, f, profile, audit = audit)
         val stored = db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT")!!.captureAuditJson!!
         val decoded = json.decodeFromString(com.siams.kern_prototype.camera.CaptureAudit.serializer(), stored)
-        assertEquals(audit, decoded)
+        assertEquals(audit, decoded.copy(saveMemory = null))
         assertEquals(null, decoded.readback)
+        // R21: замер памяти сохранения (проверка JPEG, SHA-256, миниатюра) — вместе с аудитом.
+        val save = decoded.saveMemory!!
+        assertEquals("save-layer", save.operation)
+        assertEquals(listOf("start", "validated", "sha256", "end:ok"), save.phases.map { it.name })
+    }
+
+    /**
+     * R21: метрики, чтение PSS которых висит до [gate] (медленный /proc). Ожидание прерываемо —
+     * как и у реального опроса, остановка замера его прерывает.
+     */
+    private class BlockingReader(private val gate: CountDownLatch) : MemoryReader {
+        val entered = CountDownLatch(1)
+        override fun javaUsedBytes() = 1L
+        override fun javaMaxBytes() = 2L
+        override fun nativeAllocatedBytes() = 3L
+        override fun pssKb(): Long { entered.countDown(); gate.await(10, TimeUnit.SECONDS); return 4L }
+    }
+
+    private fun simpleAudit() = com.siams.kern_prototype.camera.CaptureAudit(
+        requested = com.siams.kern_prototype.camera.CaptureAudit.Requested(8_000_000L, 25, 100, 1.9f, 1f, 1.7f),
+        applied = null,
+        limits = com.siams.kern_prototype.camera.CameraLimits.FALLBACK,
+        readback = null,
+    )
+
+    private fun probeThreadsAlive() = Thread.getAllStackTraces().keys.count { it.name == "memory-probe" && it.isAlive }
+
+    private fun waitUntil(ms: Long = 3000, cond: () -> Boolean): Boolean {
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) { if (cond()) return true; Thread.sleep(5) }
+        return cond()
+    }
+
+    /** R21: медленное чтение метрик при сохранении не занимает поток вызывающего (главный). */
+    @Test
+    fun slowMemoryReadsDoNotBlockTheCallerThread() {
+        val d = runBlocking { repo.createDrilling("Д", emptyMap()) }
+        val (id, f) = shot(d)
+        val gate = CountDownLatch(1)
+        val reader = BlockingReader(gate)
+        repo.memoryReader = reader
+        val main = Executors.newSingleThreadExecutor()
+        try {
+            val scope = CoroutineScope(main.asCoroutineDispatcher())
+            val save = scope.async { repo.saveCapture(d, null, id, LampType.DAYLIGHT, f, profile, audit = simpleAudit()) }
+            assertTrue("замер начался", reader.entered.await(5, TimeUnit.SECONDS))
+            // Пока метрики «читаются», главный поток свободен.
+            main.submit {}.get(1, TimeUnit.SECONDS)
+            gate.countDown()
+            val table = runBlocking { withTimeout(10_000) { save.await() } }
+            val stored = runBlocking { db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT") }!!.captureAuditJson!!
+            val decoded = json.decodeFromString(com.siams.kern_prototype.camera.CaptureAudit.serializer(), stored)
+            assertEquals(listOf("start", "validated", "sha256", "end:ok"), decoded.saveMemory!!.phases.map { it.name })
+            assertTrue("опрос остановлен", waitUntil { probeThreadsAlive() == 0 })
+        } finally {
+            gate.countDown()
+            main.shutdownNow()
+        }
+    }
+
+    /** R21: отклонённый (повреждённый) снимок завершает замер — опрос не остаётся работать. */
+    @Test
+    fun rejectedCaptureStopsTheProbe() = runBlocking {
+        val d = repo.createDrilling("Д", emptyMap())
+        val (id, f) = shot(d, TestJpeg.corruptMiddle(TestJpeg.bytes(320, 240), "cut"))
+        try {
+            repo.saveCapture(d, null, id, LampType.DAYLIGHT, f, profile, audit = simpleAudit())
+            fail()
+        } catch (_: IllegalStateException) {}
+        assertTrue("после ошибки опрос памяти не работает", waitUntil { probeThreadsAlive() == 0 })
+    }
+
+    /** R21: отмена сохранения посреди замера не оставляет фоновый опрос работающим. */
+    @Test
+    fun cancellationDuringMeasurementStopsTheProbe() {
+        val d = runBlocking { repo.createDrilling("Д", emptyMap()) }
+        val (id, f) = shot(d)
+        val gate = CountDownLatch(1)
+        val reader = BlockingReader(gate)
+        repo.memoryReader = reader
+        val main = Executors.newSingleThreadExecutor()
+        try {
+            val scope = CoroutineScope(main.asCoroutineDispatcher())
+            val save = scope.async { repo.saveCapture(d, null, id, LampType.DAYLIGHT, f, profile, audit = simpleAudit()) }
+            assertTrue(reader.entered.await(5, TimeUnit.SECONDS))
+            save.cancel()                      // экран закрыт посреди замера
+            gate.countDown()                   // медленное чтение завершилось
+            runBlocking { withTimeout(10_000) { save.join() } }
+            assertTrue(save.isCancelled)
+            assertTrue("после отмены опрос памяти не работает", waitUntil { probeThreadsAlive() == 0 })
+            assertNull("отменённое сохранение не записано", runBlocking { db.layerDao().getById(id) })
+        } finally {
+            gate.countDown()
+            main.shutdownNow()
+        }
     }
 
     @Test

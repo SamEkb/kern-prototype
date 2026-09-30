@@ -60,6 +60,8 @@ class ToupcamController internal constructor(
     private val deviceFactory: () -> ToupcamDevice,
     private val snapTimeoutMs: Long,
     private val shutdownWaitMs: Long,
+    /** R21: источник метрик памяти для замеров операций (выделен для тестов). */
+    private val memoryReader: MemoryReader = MemoryReader.System,
 ) : KernCamera {
 
     @Inject
@@ -442,32 +444,58 @@ class ToupcamController internal constructor(
 
     override suspend fun capture(target: File, lampType: LampType): CaptureOutcome = opLock.withLock {
         withContext(Dispatchers.IO) {
-            val conn = connectionForSnap()
-            val ready = ensureLampApplied(conn, lampType) // R10: снимок — с профилем именно этой лампы
-            val profile = ready.profile
-            // R14: всё для аудита — в этой же операции (под opLock): отчёт применения этого профиля,
-            // границы и состояние SDK непосредственно перед Snap.
-            val audit = CaptureAudit(
-                requested = CaptureAudit.Requested(
-                    exposureTimeNs = profile.exposureTimeNs,
-                    iso = profile.iso,
-                    gamma = profile.gamma,
-                    wbRedGain = profile.wbRedGain,
-                    wbGreenGain = (profile.wbGreenEvenGain + profile.wbGreenOddGain) / 2f,
-                    wbBlueGain = profile.wbBlueGain,
-                ),
-                applied = ready.report,
-                limits = _limits.value,
-                readback = readback(conn),
-            )
-            val still = snapStillBlocking(conn)
-            applyFfcIfConfigured(conn, still, profile) // §2.3: нормализация делением на эталон
-            // R09: неудачный compress — ошибка съёмки; R08: файл появляется целиком или никак.
-            writeAtomically(target) { out ->
-                still.compress(Bitmap.CompressFormat.JPEG, profile.jpegQuality.coerceIn(1, 100), out)
+            // R21: замер памяти снимка (только измерение; обработка кадра не меняется).
+            val probe = MemoryProbe("capture", memoryReader)
+            var outcome = "error"
+            try {
+                captureLocked(target, lampType, probe).also { outcome = "ok" }
+            } finally {
+                probe.finish(outcome)
             }
-            CaptureOutcome(profile, audit)
         }
+    }
+
+    private suspend fun captureLocked(target: File, lampType: LampType, probe: MemoryProbe): CaptureOutcome {
+        val conn = connectionForSnap()
+        val ready = ensureLampApplied(conn, lampType) // R10: снимок — с профилем именно этой лампы
+        probe.mark("applied")
+        val profile = ready.profile
+        // R14: всё для аудита — в этой же операции (под opLock): отчёт применения этого профиля,
+        // границы и состояние SDK непосредственно перед Snap.
+        val audit = CaptureAudit(
+            requested = CaptureAudit.Requested(
+                exposureTimeNs = profile.exposureTimeNs,
+                iso = profile.iso,
+                gamma = profile.gamma,
+                wbRedGain = profile.wbRedGain,
+                wbGreenGain = (profile.wbGreenEvenGain + profile.wbGreenOddGain) / 2f,
+                wbBlueGain = profile.wbBlueGain,
+            ),
+            applied = ready.report,
+            limits = _limits.value,
+            readback = readback(conn),
+        )
+        val still = snapStillBlocking(conn)
+        probe.mark("pulled")
+        if (applyFfcIfConfigured(conn, still, profile)) probe.mark("ffc") // §2.3: нормализация делением на эталон
+        // R09: неудачный compress — ошибка съёмки; R08: файл появляется целиком или никак.
+        writeAtomically(target) { out ->
+            still.compress(Bitmap.CompressFormat.JPEG, profile.jpegQuality.coerceIn(1, 100), out)
+        }
+        val memory = probe.finish("ok", bufferEstimates(still))
+        return CaptureOutcome(profile, audit.copy(memory = memory))
+    }
+
+    /**
+     * R21: размеры буферов снимка (живут всё подключение): Bitmap снимка — фактический размер
+     * выделения; «rgb24FrameBytes» — размер кадра RGB24 (со строками, выровненными на 4 байта).
+     * Это НЕ ёмкость нативного буфера моста: он общий для превью и снимка, только растёт и может
+     * быть больше (после другого разрешения/подключения); сама ёмкость отсюда не читается.
+     */
+    private fun bufferEstimates(still: Bitmap): Map<String, Long> = buildMap {
+        put("stillBitmap", still.allocationByteCount.toLong())
+        put("rgb24FrameBytes", ((still.width * 24L + 31) / 32 * 4) * still.height)
+        previewBitmap?.let { put("previewBitmap", it.allocationByteCount.toLong()) }
     }
 
     /**
@@ -476,17 +504,34 @@ class ToupcamController internal constructor(
      * неравномерности; сохраняем PNG рядом в filesDir (свой на профиль). Путь пишем в профиль.
      */
     override suspend fun captureFfcReference(lampType: LampType): String = opLock.withLock {
-        withContext(Dispatchers.IO) { captureFfcLocked(lampType) }
+        withContext(Dispatchers.IO) {
+            // R21: замер памяти эталона FFC — в журнал (KernMemory); обработка не меняется.
+            val probe = MemoryProbe("ffc-reference", memoryReader)
+            var outcome = "error"
+            try {
+                captureFfcLocked(lampType, probe).also { outcome = "ok" }
+            } finally {
+                lastFfcMemory = probe.finish(outcome)
+            }
+        }
     }
 
-    private suspend fun captureFfcLocked(lampType: LampType): String {
+    /** R21: замер памяти последнего эталона FFC (диагностика). */
+    @Volatile
+    internal var lastFfcMemory: MemoryTrace? = null
+        private set
+
+    private suspend fun captureFfcLocked(lampType: LampType, probe: MemoryProbe): String {
         val conn = connectionForSnap()
         ensureLampApplied(conn, lampType) // эталон — с профилем этой лампы (в редакторе — рабочим)
+        probe.mark("applied")
         val still = snapStillBlocking(conn)
+        probe.mark("pulled")
         val h = (FFC_TEMPLATE_WIDTH.toLong() * still.height / still.width).toInt().coerceAtLeast(1)
         val small = Bitmap.createScaledBitmap(still, FFC_TEMPLATE_WIDTH, h, true)
         val template = boxBlur(small, FFC_BLUR_RADIUS, FFC_BLUR_PASSES)
         if (template !== small) small.recycle()
+        probe.mark("template")
         // R11: всегда новый файл — эталон подтверждённого профиля не перезаписывается.
         // Профиль переключится на него только при «Сохранить».
         val file = FfcFiles.newFile(context, lampType)
@@ -549,15 +594,16 @@ class ToupcamController internal constructor(
      * коррекция не выполнена — ОШИБКА снимка: молча снять без настроенной коррекции нельзя
      * (снимки стали бы несопоставимы).
      */
-    private fun applyFfcIfConfigured(conn: CameraConnection, still: Bitmap, profile: CameraProfile) {
+    private fun applyFfcIfConfigured(conn: CameraConnection, still: Bitmap, profile: CameraProfile): Boolean {
         val path = profile.ffcTemplatePath
-        if (path.isBlank()) return
+        if (path.isBlank()) return false
         val tmpl = loadTemplate(path) ?: error(
             "Эталон FFC профиля «${profile.lampType.ruLabel}» не читается. " +
                 "Переснимите эталон в «Профилях камеры» и сохраните профиль.",
         )
         // Коррекция работает только с пикселями буферов (хэндл камеры не нужен) — вне очереди.
         check(conn.device.applyFlatField(still, tmpl)) { "Не удалось применить коррекцию FFC к снимку" }
+        return true
     }
 
     private fun loadTemplate(path: String): Bitmap? = synchronized(this) {

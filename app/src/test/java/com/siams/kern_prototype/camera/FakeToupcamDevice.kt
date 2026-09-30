@@ -32,6 +32,7 @@ internal class FakeCameraRig {
     /** SDK не смог сообщить размер кадра превью / снимка. */
     @Volatile var failPreviewSize = false
     @Volatile var failStillSize = false
+    @Volatile var stillWH = intArrayOf(8, 6)
     /** Сеттеры, которые SDK «отклоняет» (E_NOTIMPL), — по имени. */
     val rejectSetters: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
     /** Кадры превью (EVENT_IMAGE) идут, как у живой камеры; false — поток кадров остановлен. */
@@ -110,7 +111,7 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
     }
 
     override fun previewSize() = handle("previewSize") { if (rig.failPreviewSize) intArrayOf(0, 0) else intArrayOf(8, 6) }
-    override fun stillSize() = handle("stillSize") { if (rig.failStillSize) intArrayOf(0, 0) else intArrayOf(8, 6) }
+    override fun stillSize() = handle("stillSize") { if (rig.failStillSize) intArrayOf(0, 0) else rig.stillWH }
 
     override fun snap(): Boolean = handle("snap") {
         rig.log += "snapStart$id"
