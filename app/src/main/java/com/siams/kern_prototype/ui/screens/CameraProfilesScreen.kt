@@ -136,6 +136,12 @@ fun CameraProfilesScreen(
     val showImportWarning by vm.showImportWarning.collectAsStateWithLifecycle()
     val cameraState by vm.cameraState.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
+    val dirty by vm.dirty.collectAsStateWithLifecycle()
+    val exitPrompt by vm.exitPrompt.collectAsStateWithLifecycle()
+    val exit by vm.exit.collectAsStateWithLifecycle()
+    // R23/R13: выход — только через VM (несохранённые черновики, идущая автонастройка).
+    androidx.activity.compose.BackHandler { vm.requestExit() }
+    LaunchedEffect(exit) { if (exit) onBack() }
     LaunchedEffect(message) {
         message?.let {
             android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
@@ -144,7 +150,10 @@ fun CameraProfilesScreen(
     }
 
     var selected by remember { mutableIntStateOf(0) }
+    // R13: процедуры — только при готовой камере (раньше без подключения считалось «поддерживается»).
+    val cameraReady = cameraState is CameraControllerState.Ready
     val manualSupported = (cameraState as? CameraControllerState.Ready)?.manualSupported ?: true
+    val busy = autoProc != AutoProc.NONE
     val spec = PARAMS[selected]
 
     // §4.2: экспорт/импорт профилей через системный выбор файла (SAF).
@@ -218,15 +227,20 @@ fun CameraProfilesScreen(
             verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) {
+                IconButton(onClick = vm::requestExit, enabled = !busy) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад", tint = Color.White)
                 }
                 Text("Профиль камеры", style = Body2Bold, color = Color.White)
             }
-            LampSwitch(selected = lamp, onSelect = vm::selectLamp, modifier = Modifier.fillMaxWidth())
+            LampSwitch(selected = lamp, onSelect = vm::selectLamp, modifier = Modifier.fillMaxWidth(), enabled = !busy)
+            if (dirty.isNotEmpty()) {
+                Text(
+                    "Не сохранено: " + dirty.sortedBy { it.ordinal }.joinToString { it.ruLabel },
+                    style = Body4, color = Orange30,
+                )
+            }
 
             // §1/§2: автоматические процедуры — визуально выделены и сверху.
-            val busy = autoProc != AutoProc.NONE
             Text("Автонастройка", style = Body3Bold, color = Color.White)
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -234,18 +248,18 @@ fun CameraProfilesScreen(
             ) {
                 OutlinedButton(
                     onClick = vm::runAutoExposure,
-                    enabled = !busy && manualSupported,
+                    enabled = !busy && cameraReady && manualSupported,
                     modifier = Modifier.weight(1f),
                 ) { Text("Автоэкспозиция") }
                 OutlinedButton(
                     onClick = vm::runAutoWhiteBalance,
-                    enabled = !busy && manualSupported,
+                    enabled = !busy && cameraReady && manualSupported,
                     modifier = Modifier.weight(1f),
                 ) { Text("Автобаланс") }
             }
             OutlinedButton(
                 onClick = vm::requestFfc,
-                enabled = !busy && manualSupported,
+                enabled = !busy && cameraReady && manualSupported,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (profile.ffcTemplatePath.isNotBlank()) "Переснять эталон (FFC)" else "Коррекция освещения (FFC)")
@@ -298,6 +312,7 @@ fun CameraProfilesScreen(
                 value = spec.get(profile).coerceIn(spec.min, spec.max),
                 valueRange = spec.min..spec.max,
                 onValueChange = { v -> vm.update(spec.set(profile, v)) },
+                enabled = !busy, // R13: ползунок не конкурирует с автонастройкой
             )
             Row(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -334,14 +349,16 @@ fun CameraProfilesScreen(
                                 }
                         }
                     },
+                    enabled = !busy,
                     modifier = Modifier.weight(1f),
                 ) { Text("Экспорт") }
                 OutlinedButton(
                     onClick = { importLauncher.launch(arrayOf("application/json", "*/*")) },
+                    enabled = !busy,
                     modifier = Modifier.weight(1f),
                 ) { Text("Импорт") }
             }
-            Button(onClick = vm::requestSave, modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = vm::requestSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                 Text("Сохранить профиль «${lamp.ruLabel}»")
             }
         }
@@ -382,6 +399,29 @@ fun CameraProfilesScreen(
             )
         }
 
+        // R23: несохранённые черновики при выходе.
+        exitPrompt?.let { lamps ->
+            AlertDialog(
+                onDismissRequest = vm::cancelExit,
+                title = { Text("Сохранить изменения профилей?") },
+                text = {
+                    Text(
+                        "Не сохранены изменения профилей: " +
+                            lamps.sortedBy { it.ordinal }.joinToString { "«${it.ruLabel}»" } + ". " +
+                            "Сохранение изменит профили, по которым идёт съёмка: новые снимки могут " +
+                            "отличаться от уже отснятых.",
+                    )
+                },
+                confirmButton = { TextButton(onClick = vm::saveAllAndExit) { Text("Сохранить всё") } },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = vm::discardAndExit) { Text("Не сохранять") }
+                        TextButton(onClick = vm::cancelExit) { Text("Остаться") }
+                    }
+                },
+            )
+        }
+
         // §4.2: то же предупреждение о несопоставимости снимков перед импортом профилей.
         if (showImportWarning) {
             AlertDialog(
@@ -392,6 +432,8 @@ fun CameraProfilesScreen(
                         "Импорт заменит текущие профили камеры (дневной и УФ) параметрами из файла. " +
                             "Это может привести к тому, что порода будет выглядеть иначе на новых снимках " +
                             "по сравнению с уже отснятыми материалами, и нарушить их сопоставимость.\n\n" +
+                            (if (dirty.isNotEmpty()) "Несохранённые изменения будут потеряны: " +
+                                dirty.sortedBy { it.ordinal }.joinToString { it.ruLabel } + ".\n\n" else "") +
                             "Применить импортированные профили?",
                     )
                 },

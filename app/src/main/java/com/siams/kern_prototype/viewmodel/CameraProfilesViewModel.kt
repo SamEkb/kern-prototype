@@ -22,9 +22,16 @@ import javax.inject.Inject
 enum class AutoProc { NONE, EXPOSURE, WHITE_BALANCE, FLAT_FIELD }
 
 /**
- * Живой редактор профилей камеры (§6.3, §12/Этап 1). Держит [CameraController],
- * показывает превью и применяет редактируемый профиль МГНОВЕННО (пересборка
- * repeating request без перезапуска сессии). Сохранение — по кнопке.
+ * Живой редактор профилей камеры (§6.3, §12/Этап 1). Показывает превью и применяет
+ * редактируемый профиль к камере сразу. Сохранение — по кнопке.
+ *
+ * R23: у каждой лампы свой черновик. Переключение лампы не теряет несохранённые правки другой;
+ * выход с несохранёнными черновиками — только через явное решение ([requestExit]).
+ *
+ * R13: пока идёт авто-процедура (AE/AWB/FFC), конфликтующие действия — смена лампы, ползунки,
+ * сохранение, импорт/экспорт, выход — запрещены здесь (а не только кнопками). Результат процедуры
+ * привязан к лампе и ревизии черновика, для которых её запустили: устаревший отбрасывается.
+ * Процедуры запускаются только при готовой камере.
  */
 @HiltViewModel
 class CameraProfilesViewModel @Inject constructor(
@@ -36,19 +43,37 @@ class CameraProfilesViewModel @Inject constructor(
     private val _lamp = MutableStateFlow(LampType.DAYLIGHT)
     val lamp: StateFlow<LampType> = _lamp.asStateFlow()
 
-    // Редактируемая копия профиля выбранной лампы; применяется к превью на лету.
+    // Черновики и сохранённые версии по лампам (R23). null — ещё не загружены.
+    private val drafts = mutableMapOf<LampType, CameraProfile>()
+    private val savedByLamp = mutableMapOf<LampType, CameraProfile>()
+
+    /** Ревизия черновика каждой лампы: растёт при любом его изменении (R13 — устаревшие результаты). */
+    private val revisions = mutableMapOf<LampType, Long>()
+
+    // Черновик выбранной лампы; применяется к превью на лету.
     private val _working = MutableStateFlow(CameraProfile.defaultFor(LampType.DAYLIGHT))
     val working: StateFlow<CameraProfile> = _working.asStateFlow()
 
-    // Последняя сохранённая версия профиля (для показа даты изменения и решения о предупреждении).
+    // Сохранённая версия профиля выбранной лампы (дата изменения и решение о предупреждении).
     private val _saved = MutableStateFlow(CameraProfile.defaultFor(LampType.DAYLIGHT))
     val saved: StateFlow<CameraProfile> = _saved.asStateFlow()
+
+    /**
+     * Лампа, чей профиль загружен и показан (null — идёт загрузка). До загрузки правки, процедуры
+     * и сохранение не принимаются: иначе правка делалась бы от значений по умолчанию.
+     */
+    private val _loaded = MutableStateFlow<LampType?>(null)
+    val loaded: StateFlow<LampType?> = _loaded.asStateFlow()
+
+    /** Лампы с несохранёнными изменениями (R23). */
+    private val _dirty = MutableStateFlow<Set<LampType>>(emptySet())
+    val dirty: StateFlow<Set<LampType>> = _dirty.asStateFlow()
 
     // §4.1: показать предупреждение о несопоставимости снимков перед перезаписью профиля.
     private val _showModifyWarning = MutableStateFlow(false)
     val showModifyWarning: StateFlow<Boolean> = _showModifyWarning.asStateFlow()
 
-    // §2: какая авто-процедура сейчас идёт (для прогресса и блокировки кнопок).
+    // §2: какая авто-процедура сейчас идёт (для прогресса и блокировки).
     private val _autoProc = MutableStateFlow(AutoProc.NONE)
     val autoProc: StateFlow<AutoProc> = _autoProc.asStateFlow()
 
@@ -61,6 +86,14 @@ class CameraProfilesViewModel @Inject constructor(
     val showImportWarning: StateFlow<Boolean> = _showImportWarning.asStateFlow()
     private var pendingImportJson: String? = null
 
+    /** R23: запрос выхода при несохранённых черновиках — лампы с изменениями (null — диалога нет). */
+    private val _exitPrompt = MutableStateFlow<Set<LampType>?>(null)
+    val exitPrompt: StateFlow<Set<LampType>?> = _exitPrompt.asStateFlow()
+
+    /** Экрану можно закрыться (решение о черновиках принято или их нет). */
+    private val _exit = MutableStateFlow(false)
+    val exit: StateFlow<Boolean> = _exit.asStateFlow()
+
     val cameraState: StateFlow<CameraControllerState> = controller.state
 
     private val _message = MutableStateFlow<String?>(null)
@@ -69,12 +102,11 @@ class CameraProfilesViewModel @Inject constructor(
     private var pendingSurface: SurfaceTexture? = null
     private var opened = false
 
+    /** Идёт авто-процедура — конфликтующие действия запрещены (R13). */
+    val isBusy: Boolean get() = _autoProc.value != AutoProc.NONE
+
     init {
-        viewModelScope.launch {
-            val loaded = store.read(_lamp.value)
-            _saved.value = loaded
-            _working.value = loaded
-        }
+        viewModelScope.launch { showLamp(_lamp.value) }
         // Живое применение: любое изменение рабочего профиля сразу уходит в превью.
         viewModelScope.launch {
             _working.collectLatest { p ->
@@ -113,52 +145,104 @@ class CameraProfilesViewModel @Inject constructor(
         }.onFailure { _message.value = it.message }
     }
 
-    /** Переключить редактируемый профиль (Дневной/УФ): подгрузить его и показать в превью. */
-    fun selectLamp(lampType: LampType) {
-        if (_lamp.value == lampType) return
-        _lamp.value = lampType
-        viewModelScope.launch {
-            val loaded = store.read(lampType)
-            _saved.value = loaded
-            _working.value = loaded
-        }
+    // ---- Черновики (R23) ----------------------------------------------------------------
+
+    private suspend fun savedOf(lamp: LampType): CameraProfile =
+        savedByLamp[lamp] ?: store.read(lamp).also { savedByLamp[lamp] = it }
+
+    /** Показать черновик лампы (или сохранённую версию, если черновика нет). */
+    private suspend fun showLamp(lamp: LampType) {
+        val saved = savedOf(lamp)
+        val draft = drafts[lamp] ?: saved.also { drafts[lamp] = it }
+        if (_lamp.value != lamp) return // пока загружали, выбрали другую лампу
+        _saved.value = saved
+        _working.value = draft
+        refreshDirty()
+        _loaded.value = lamp
     }
 
-    /** Изменение параметра из UI — обновляем рабочий профиль (превью применит сам). */
-    fun update(profile: CameraProfile) {
-        _working.value = profile
+    /** Профиль выбранной лампы загружен (правки, процедуры и сохранение возможны). */
+    private fun isLoaded(): Boolean = _loaded.value == _lamp.value && drafts[_lamp.value] != null
+
+    private fun setDraft(lamp: LampType, profile: CameraProfile) {
+        drafts[lamp] = profile
+        revisions[lamp] = (revisions[lamp] ?: 0) + 1
+        if (_lamp.value == lamp) _working.value = profile
+        refreshDirty()
     }
+
+    private fun refreshDirty() {
+        _dirty.value = drafts.filter { (lamp, draft) -> savedByLamp[lamp]?.let { it != draft } ?: false }.keys.toSet()
+    }
+
+    private fun refuseIfBusy(): Boolean {
+        if (isBusy) _message.value = "Дождитесь окончания автонастройки"
+        return isBusy
+    }
+
+    /** Переключить редактируемый профиль. Черновик прежней лампы сохраняется (R23). */
+    fun selectLamp(lampType: LampType) {
+        if (_lamp.value == lampType || refuseIfBusy()) return
+        _loaded.value = null
+        _lamp.value = lampType
+        viewModelScope.launch { showLamp(lampType) }
+    }
+
+    /** Изменение параметра из UI (черновик выбранной лампы; превью применит сам). */
+    fun update(profile: CameraProfile) {
+        // R13: ползунок во время процедуры/чужая лампа; до загрузки профиля лампы — не от чего править.
+        if (isBusy || profile.lampType != _lamp.value || !isLoaded()) return
+        setDraft(profile.lampType, profile)
+    }
+
+    // ---- Авто-процедуры (R13) ------------------------------------------------------------
 
     /**
-     * §2.1: запустить автоэкспозицию. Результат (выдержка+усиление) подставляется в
-     * рабочий профиль; пользователь может скорректировать вручную после.
+     * Запустить процедуру [kind] для выбранной лампы. Результат принимается, только если лампа и
+     * ревизия её черновика не изменились с запуска; иначе отбрасывается.
      */
-    fun runAutoExposure() {
-        if (_autoProc.value != AutoProc.NONE) return
-        _autoProc.value = AutoProc.EXPOSURE
+    private fun runProc(kind: AutoProc, doneMessage: String, block: suspend (CameraProfile, LampType) -> CameraProfile?) {
+        if (refuseIfBusy() || !isLoaded()) return
+        if (controller.state.value !is CameraControllerState.Ready) {
+            _message.value = "Камера не готова"
+            return
+        }
+        val lamp = _lamp.value
+        val base = drafts[lamp] ?: _working.value
+        val revision = revisions[lamp] ?: 0
+        _autoProc.value = kind
         viewModelScope.launch {
-            runCatching { controller.autoExposure(_working.value) }
-                .onSuccess { _working.value = it; _message.value = "Автоэкспозиция завершена" }
-                .onFailure { _message.value = it.message ?: "Ошибка автоэкспозиции" }
-            _autoProc.value = AutoProc.NONE
+            try {
+                runCatching { block(base, lamp) }
+                    .onSuccess { result ->
+                        when {
+                            result == null -> Unit
+                            (revisions[lamp] ?: 0) != revision || result.lampType != lamp ->
+                                _message.value = "Результат автонастройки устарел и не применён"
+                            else -> {
+                                setDraft(lamp, result)
+                                _message.value = doneMessage
+                            }
+                        }
+                    }
+                    .onFailure { _message.value = it.message ?: "Ошибка автонастройки" }
+            } finally {
+                _autoProc.value = AutoProc.NONE
+            }
         }
     }
 
-    /** §2.2: запустить автобаланс белого; результат (R/G/B) подставляется в рабочий профиль. */
-    fun runAutoWhiteBalance() {
-        if (_autoProc.value != AutoProc.NONE) return
-        _autoProc.value = AutoProc.WHITE_BALANCE
-        viewModelScope.launch {
-            runCatching { controller.autoWhiteBalance(_working.value) }
-                .onSuccess { _working.value = it; _message.value = "Автобаланс белого завершён" }
-                .onFailure { _message.value = it.message ?: "Ошибка автобаланса" }
-            _autoProc.value = AutoProc.NONE
-        }
-    }
+    /** §2.1: автоэкспозиция; результат (выдержка+усиление) — в черновик лампы запуска. */
+    fun runAutoExposure() =
+        runProc(AutoProc.EXPOSURE, "Автоэкспозиция завершена") { base, _ -> controller.autoExposure(base) }
+
+    /** §2.2: автобаланс белого; результат (R/G/B) — в черновик лампы запуска. */
+    fun runAutoWhiteBalance() =
+        runProc(AutoProc.WHITE_BALANCE, "Автобаланс белого завершён") { base, _ -> controller.autoWhiteBalance(base) }
 
     /** §2.3: показать инструкцию (поместить белый фон) перед съёмкой эталона FFC. */
     fun requestFfc() {
-        if (_autoProc.value == AutoProc.NONE) _showFfcInstruction.value = true
+        if (!refuseIfBusy()) _showFfcInstruction.value = true
     }
 
     fun dismissFfc() {
@@ -166,34 +250,30 @@ class CameraProfilesViewModel @Inject constructor(
     }
 
     /**
-     * §2.3: снять эталонный кадр FFC после подтверждения. Путь к шаблону кладём в рабочий
-     * профиль (сохранится вместе с профилем); коррекция снимков — внутри [KernCamera.capture].
+     * §2.3: снять эталонный кадр FFC после подтверждения. Путь к шаблону — в черновик ЛАМПЫ ЗАПУСКА
+     * (сохранится вместе с профилем); коррекция снимков — внутри [KernCamera.capture].
      */
     fun confirmFfc() {
         _showFfcInstruction.value = false
-        if (_autoProc.value != AutoProc.NONE) return
-        _autoProc.value = AutoProc.FLAT_FIELD
-        viewModelScope.launch {
-            runCatching { controller.captureFfcReference(_lamp.value) }
-                .onSuccess { path ->
-                    if (path != null) {
-                        _working.value = _working.value.copy(ffcTemplatePath = path)
-                        _message.value = "Эталон FFC снят. Сохраните профиль, чтобы применить."
-                    } else {
-                        _message.value = "FFC не поддерживается этой камерой"
-                    }
-                }
-                .onFailure { _message.value = it.message ?: "Ошибка съёмки эталона FFC" }
-            _autoProc.value = AutoProc.NONE
+        runProc(AutoProc.FLAT_FIELD, "Эталон FFC снят. Сохраните профиль, чтобы применить.") { base, lamp ->
+            val path = controller.captureFfcReference(lamp)
+            if (path == null) {
+                _message.value = "FFC не поддерживается этой камерой"
+                null
+            } else {
+                base.copy(ffcTemplatePath = path)
+            }
         }
     }
 
+    // ---- Сохранение (§4.1) ---------------------------------------------------------------
+
     /**
-     * Запрос на сохранение (§4.1). Если профиль уже был откалиброван ранее
-     * (`lastModifiedAt > 0`) — сперва показываем предупреждение о несопоставимости
-     * снимков и ждём явного подтверждения. Первое сохранение (из дефолта) — без предупреждения.
+     * Запрос на сохранение черновика выбранной лампы. Если профиль уже был откалиброван ранее
+     * (`lastModifiedAt > 0`) — сперва предупреждение о несопоставимости снимков.
      */
     fun requestSave() {
+        if (refuseIfBusy() || !isLoaded()) return
         if (_saved.value.lastModifiedAt > 0L) _showModifyWarning.value = true else confirmSave()
     }
 
@@ -201,23 +281,71 @@ class CameraProfilesViewModel @Inject constructor(
         _showModifyWarning.value = false
     }
 
-    /** Подтверждённое сохранение: пишем профиль с новой отметкой времени. */
+    /** Подтверждённое сохранение черновика выбранной лампы. */
     fun confirmSave() {
         _showModifyWarning.value = false
+        if (refuseIfBusy()) return
+        val lamp = _lamp.value
         viewModelScope.launch {
-            val toSave = _working.value.copy(lastModifiedAt = System.currentTimeMillis())
-            store.save(toSave)
-            _saved.value = toSave
-            _working.value = toSave
-            _message.value = "Профиль «${_lamp.value.ruLabel}» сохранён"
+            saveDraft(lamp)
+            _message.value = "Профиль «${lamp.ruLabel}» сохранён"
         }
     }
 
+    private suspend fun saveDraft(lamp: LampType) {
+        val draft = drafts[lamp] ?: return
+        val toSave = draft.copy(lastModifiedAt = System.currentTimeMillis())
+        store.save(toSave)
+        savedByLamp[lamp] = toSave
+        drafts[lamp] = toSave
+        if (_lamp.value == lamp) {
+            _saved.value = toSave
+            _working.value = toSave
+        }
+        refreshDirty()
+    }
+
+    // ---- Выход (R23) ----------------------------------------------------------------------
+
+    /** «Назад»: во время процедуры — нельзя; есть несохранённые черновики — спросить. */
+    fun requestExit() {
+        if (refuseIfBusy()) return
+        val dirty = _dirty.value
+        if (dirty.isEmpty()) _exit.value = true else _exitPrompt.value = dirty
+    }
+
+    fun cancelExit() {
+        _exitPrompt.value = null
+    }
+
+    /** Выйти, отбросив несохранённые черновики. */
+    fun discardAndExit() {
+        _exitPrompt.value = null
+        _exit.value = true
+    }
+
+    /** Сохранить все несохранённые черновики и выйти. */
+    fun saveAllAndExit() {
+        val lamps = _exitPrompt.value ?: return
+        _exitPrompt.value = null
+        viewModelScope.launch {
+            runCatching { lamps.forEach { saveDraft(it) } }
+                .onSuccess { _exit.value = true }
+                .onFailure { _message.value = it.message ?: "Не удалось сохранить профили" }
+        }
+    }
+
+    // ---- Перенос профилей (§4.2) -----------------------------------------------------------
+
     /** §4.2: собрать JSON со всеми профилями и эталонами FFC (экран запишет его в выбранный файл). */
-    suspend fun buildExportJson(): String = transfer.exportJson()
+    suspend fun buildExportJson(): String {
+        check(!isBusy) { "Дождитесь окончания автонастройки" }
+        return transfer.exportJson()
+    }
 
     /** §4.2: файл выбран для импорта — показываем предупреждение перед применением. */
     fun stageImport(json: String) {
+        if (refuseIfBusy()) return
         pendingImportJson = json
         _showImportWarning.value = true
     }
@@ -227,17 +355,20 @@ class CameraProfilesViewModel @Inject constructor(
         _showImportWarning.value = false
     }
 
-    /** §4.2: подтверждённый импорт — применить профили и перечитать текущий в редактор. */
+    /** §4.2: подтверждённый импорт — профили заменяются, черновики сбрасываются. */
     fun confirmImport() {
         val text = pendingImportJson ?: return
         pendingImportJson = null
         _showImportWarning.value = false
+        if (refuseIfBusy()) return
         viewModelScope.launch {
             runCatching { transfer.importJson(text) }
                 .onSuccess { n ->
-                    val loaded = store.read(_lamp.value)
-                    _saved.value = loaded
-                    _working.value = loaded
+                    drafts.clear()
+                    savedByLamp.clear()
+                    LampType.entries.forEach { revisions[it] = (revisions[it] ?: 0) + 1 }
+                    showLamp(_lamp.value)
+                    refreshDirty()
                     _message.value = "Импортировано профилей: $n"
                 }
                 .onFailure { _message.value = it.message ?: "Ошибка импорта профиля" }
