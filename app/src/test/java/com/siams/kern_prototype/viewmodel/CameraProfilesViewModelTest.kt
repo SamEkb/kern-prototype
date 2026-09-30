@@ -55,7 +55,7 @@ class CameraProfilesViewModelTest {
         override suspend fun startSession(surface: android.view.Surface) {}
         override suspend fun applyProfile(profile: CameraProfile) {}
         override suspend fun switchLamp(lampType: LampType) {}
-        override suspend fun capture(target: File, lampType: LampType) = CameraProfile.defaultFor(lampType)
+        override suspend fun capture(target: File, lampType: LampType) = com.siams.kern_prototype.camera.CaptureOutcome(CameraProfile.defaultFor(lampType), audit = null)
         override suspend fun autoExposure(current: CameraProfile): CameraProfile {
             started += "ae"; gate?.await(); return current.copy(iso = 777)
         }

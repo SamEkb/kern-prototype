@@ -56,4 +56,10 @@ data class LayerEntity(
      * до v5 (проверяется полным декодированием).
      */
     val fileSha256: String? = null,
+    /**
+     * R14: аудит параметров снимка ([com.siams.kern_prototype.camera.CaptureAudit], JSON): запрос,
+     * значения после ограничения, результаты сеттеров SDK, границы, состояние SDK около снимка.
+     * null — снимок до v6 или камера аудит не ведёт. На сервер не отправляется.
+     */
+    val captureAuditJson: String? = null,
 )

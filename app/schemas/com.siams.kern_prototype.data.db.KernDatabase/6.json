@@ -1,0 +1,279 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 6,
+    "identityHash": "ceb01e5352d83f7e070e18fb19ca1754",
+    "entities": [
+      {
+        "tableName": "drilling",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, `passportJson` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `syncStatus` TEXT NOT NULL, `remoteId` TEXT, `lastError` TEXT, `uploadedTables` INTEGER NOT NULL, `totalTables` INTEGER NOT NULL, `editRevision` INTEGER NOT NULL DEFAULT 0, `remoteDestination` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "passportJson",
+            "columnName": "passportJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncStatus",
+            "columnName": "syncStatus",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteId",
+            "columnName": "remoteId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "uploadedTables",
+            "columnName": "uploadedTables",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalTables",
+            "columnName": "totalTables",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "editRevision",
+            "columnName": "editRevision",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "remoteDestination",
+            "columnName": "remoteDestination",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "core_table",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `drillingId` TEXT NOT NULL, `number` INTEGER NOT NULL, `stackUid` TEXT NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`drillingId`) REFERENCES `drilling`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "drillingId",
+            "columnName": "drillingId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "number",
+            "columnName": "number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stackUid",
+            "columnName": "stackUid",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_core_table_drillingId",
+            "unique": false,
+            "columnNames": [
+              "drillingId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_core_table_drillingId` ON `${TABLE_NAME}` (`drillingId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "drilling",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "drillingId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "layer",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `tableId` TEXT NOT NULL, `lampType` TEXT NOT NULL, `filePath` TEXT NOT NULL, `thumbPath` TEXT, `cameraProfileJson` TEXT NOT NULL, `capturedAt` INTEGER NOT NULL, `coreImageType` TEXT NOT NULL, `kernUpperDepth` REAL, `kernLowerDepth` REAL, `remoteImageId` TEXT, `metaConfirmed` INTEGER NOT NULL DEFAULT 0, `staleRemoteImageId` TEXT, `fileSha256` TEXT, `captureAuditJson` TEXT, PRIMARY KEY(`id`), FOREIGN KEY(`tableId`) REFERENCES `core_table`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "tableId",
+            "columnName": "tableId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lampType",
+            "columnName": "lampType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thumbPath",
+            "columnName": "thumbPath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "cameraProfileJson",
+            "columnName": "cameraProfileJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capturedAt",
+            "columnName": "capturedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coreImageType",
+            "columnName": "coreImageType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kernUpperDepth",
+            "columnName": "kernUpperDepth",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "kernLowerDepth",
+            "columnName": "kernLowerDepth",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "remoteImageId",
+            "columnName": "remoteImageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "metaConfirmed",
+            "columnName": "metaConfirmed",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "staleRemoteImageId",
+            "columnName": "staleRemoteImageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fileSha256",
+            "columnName": "fileSha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "captureAuditJson",
+            "columnName": "captureAuditJson",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_layer_tableId",
+            "unique": false,
+            "columnNames": [
+              "tableId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_layer_tableId` ON `${TABLE_NAME}` (`tableId`)"
+          },
+          {
+            "name": "index_layer_tableId_lampType",
+            "unique": true,
+            "columnNames": [
+              "tableId",
+              "lampType"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_layer_tableId_lampType` ON `${TABLE_NAME}` (`tableId`, `lampType`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "core_table",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "tableId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ceb01e5352d83f7e070e18fb19ca1754')"
+    ]
+  }
+}

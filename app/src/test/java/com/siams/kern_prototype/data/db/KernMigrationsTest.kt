@@ -121,6 +121,43 @@ class KernMigrationsTest {
     }
 
     @Test
+    fun migrate5To6_keepsDataAndLeavesAuditMissing() {
+        val name = "mig5.db"
+        createFromSchema(name, 5) { db ->
+            db.execSQL(
+                """INSERT INTO drilling (id, title, passportJson, createdAt, syncStatus, remoteId, lastError,
+                   uploadedTables, totalTables, editRevision, remoteDestination)
+                   VALUES ('d1', 'Д', '{"field":"Тест"}', 1, 'SENT', 'd1', NULL, 1, 1, 3, 'http://a:8080|user')""",
+            )
+            db.execSQL("INSERT INTO core_table (id, drillingId, number, stackUid) VALUES ('t1', 'd1', 1, 's1')")
+            db.execSQL(
+                """INSERT INTO layer (id, tableId, lampType, filePath, thumbPath, cameraProfileJson, capturedAt,
+                   coreImageType, kernUpperDepth, kernLowerDepth, remoteImageId, metaConfirmed, staleRemoteImageId, fileSha256)
+                   VALUES ('l1', 't1', 'DAYLIGHT', '/f/l1.jpg', '/f/l1_t.jpg', '{"iso":100}', 2, 'UNKNOWN', 1.5, 2.5,
+                   'img-1', 1, NULL, 'abc123')""",
+            )
+        }
+        val room = Room.databaseBuilder(context, KernDatabase::class.java, name)
+            .addMigrations(*KernMigrations.ALL).allowMainThreadQueries().build()
+        try {
+            runBlocking {
+                val d = room.drillingDao().getById("d1")!!
+                assertEquals("http://a:8080|user", d.remoteDestination)
+                assertEquals(3L, d.editRevision)
+                val l = room.layerDao().getById("l1")!!
+                assertEquals("img-1", l.remoteImageId)
+                assertTrue(l.metaConfirmed)
+                assertEquals("abc123", l.fileSha256)
+                assertEquals("{\"iso\":100}", l.cameraProfileJson)
+                assertEquals(1.5, l.kernUpperDepth!!, 0.0)
+                assertEquals("у старого снимка аудита нет", null, l.captureAuditJson)
+            }
+        } finally {
+            room.close()
+        }
+    }
+
+    @Test
     fun appOpenOfV3_makesBackupAndMigrates() {
         createFromSchema(KernDatabase.NAME, 3) { db ->
             db.execSQL(

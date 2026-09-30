@@ -18,18 +18,15 @@ import kotlin.math.roundToInt
  */
 object ToupcamProfileApplier {
 
-    private const val EXPO_MIN_US = 100          // ~0.1 мс
-    private const val EXPO_MAX_US = 15_000_000   // 15 с
-    private const val GAIN_MIN_PERCENT = 100     // 1.0x
-    private const val GAIN_MAX_PERCENT = 5100    // запас; реально клампится камерой
     private const val WBGAIN_LIMIT = 127         // TOUPCAM_WBGAIN_MIN/MAX = -127..127
-    const val GAMMA_MIN = 20                      // TOUPCAM_GAMMA_MIN
-    const val GAMMA_MAX = 180                     // TOUPCAM_GAMMA_MAX
+    const val GAMMA_MIN = CameraLimits.GAMMA_MIN
+    const val GAMMA_MAX = CameraLimits.GAMMA_MAX
     const val GAMMA_DEF = 100                     // TOUPCAM_GAMMA_DEF (1.0)
 
     /**
-     * R14: что отправлено в SDK (нативные значения) и какие сеттеры SDK отклонил (HRESULT).
-     * Отказ сеттера снимок не останавливает — он фиксируется для диагностики и аудита.
+     * R14: что отправлено в SDK (нативные значения ПОСЛЕ ограничения границами камеры) и результат
+     * каждого сеттера (HRESULT). Отказ сеттера снимок не останавливает — он фиксируется для
+     * диагностики и аудита.
      */
     @kotlinx.serialization.Serializable
     data class ApplyReport(
@@ -37,23 +34,32 @@ object ToupcamProfileApplier {
         val gainPercent: Int,
         val wbGain: List<Int>,
         val gamma: Int,
-        /** Сеттер → HRESULT (hex) для отклонённых; пусто — все приняты. */
+        /** Сеттер → HRESULT (hex) для ВСЕХ вызовов, в порядке вызова. */
+        val results: Map<String, String> = emptyMap(),
+        /** Сеттер → HRESULT (hex) для отклонённых (hr < 0); пусто — все приняты. */
         val rejected: Map<String, String> = emptyMap(),
     )
 
-    internal fun apply(cam: ToupcamDevice, profile: CameraProfile): ApplyReport {
+    /**
+     * Применить профиль с границами [limits] текущей камеры. Вызовы SDK и их порядок — прежние;
+     * границы влияют только на значения (сохранённый профиль не меняется).
+     */
+    internal fun apply(cam: ToupcamDevice, profile: CameraProfile, limits: CameraLimits = CameraLimits.FALLBACK): ApplyReport {
+        val results = linkedMapOf<String, String>()
         val rejected = linkedMapOf<String, String>()
         fun check(name: String, hr: Int) {
-            if (hr < 0) rejected[name] = "0x%08x".format(hr)
+            val hex = "0x%08x".format(hr)
+            results[name] = hex
+            if (hr < 0) rejected[name] = hex
         }
         // Автоэкспозиция — OFF (детерминизм, §6.2).
         check("AutoExpoEnable", cam.setAutoExpoEnable(0))
 
-        val us = (profile.exposureTimeNs / 1_000L).coerceIn(EXPO_MIN_US.toLong(), EXPO_MAX_US.toLong()).toInt()
+        val us = limits.exposureUs.clamp(profile.exposureTimeNs / 1_000L)
         check("ExpoTime", cam.setExpoTime(us))
 
         // ISO трактуем как процент усиления (ISO 100 → 100 % = 1.0x).
-        val gain = profile.iso.coerceIn(GAIN_MIN_PERCENT, GAIN_MAX_PERCENT)
+        val gain = limits.gainPercent.clamp(profile.iso)
         check("ExpoAGain", cam.setExpoAGain(gain))
 
         // WB: относительные множители R/B к зелёному → знаковые gain'ы Touptek.
@@ -62,9 +68,9 @@ object ToupcamProfileApplier {
         check("WhiteBalanceGain", cam.setWhiteBalanceGain(wb[0], wb[1], wb[2]))
 
         // Гамма (§3.3) — тональная кривая, критична для УФ.
-        val gamma = profile.gamma.coerceIn(GAMMA_MIN, GAMMA_MAX)
+        val gamma = limits.gamma.clamp(profile.gamma)
         check("Gamma", cam.setGamma(gamma))
-        return ApplyReport(us, gain, wb, gamma, rejected)
+        return ApplyReport(us, gain, wb, gamma, results, rejected)
     }
 
     /**

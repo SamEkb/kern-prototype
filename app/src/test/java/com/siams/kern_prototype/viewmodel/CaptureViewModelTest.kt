@@ -85,11 +85,11 @@ class CaptureViewModelTest {
         override suspend fun startSession(surface: android.view.Surface) { calls += "session" }
         override suspend fun applyProfile(profile: CameraProfile) {}
         override suspend fun switchLamp(lampType: LampType) { switches += lampType }
-        override suspend fun capture(target: File, lampType: LampType): CameraProfile {
+        override suspend fun capture(target: File, lampType: LampType): com.siams.kern_prototype.camera.CaptureOutcome {
             started.complete(Unit)
             release.await()
             target.writeBytes(TestJpeg.bytes())
-            return CameraProfile.defaultFor(lampType)
+            return com.siams.kern_prototype.camera.CaptureOutcome(CameraProfile.defaultFor(lampType), audit = null)
         }
         override fun release() {}
     }

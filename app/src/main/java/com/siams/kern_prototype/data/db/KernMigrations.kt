@@ -44,5 +44,12 @@ object KernMigrations {
         }
     }
 
-    val ALL: Array<Migration> = arrayOf(MIGRATION_3_4, MIGRATION_4_5)
+    /** v5 → v6 (R14): `layer.captureAuditJson`; у существующих снимков аудита нет (NULL). */
+    val MIGRATION_5_6 = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE layer ADD COLUMN captureAuditJson TEXT")
+        }
+    }
+
+    val ALL: Array<Migration> = arrayOf(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
 }

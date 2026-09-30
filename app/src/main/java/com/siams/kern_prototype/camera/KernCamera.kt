@@ -38,6 +38,12 @@ interface KernCamera {
     /** Текущий применённый профиль (для аудита идентичности и HUD). */
     val activeProfile: CameraProfile
 
+    /**
+     * R14: границы параметров текущей камеры — общие для применения профиля и редактора.
+     * По умолчанию — согласованный запасной диапазон.
+     */
+    val limits: StateFlow<CameraLimits> get() = FALLBACK_LIMITS
+
     /** Открыть/подключить камеру, выбрать размеры, загрузить профиль под [lampType]. */
     suspend fun open(lampType: LampType)
 
@@ -54,7 +60,7 @@ interface KernCamera {
      * Снять кадр максимального качества в [target] (§6.5). Возвращает применённый
      * профиль (для аудита идентичности).
      */
-    suspend fun capture(target: File, lampType: LampType): CameraProfile
+    suspend fun capture(target: File, lampType: LampType): CaptureOutcome
 
     /**
      * §2.1: автоэкспозиция «в одно нажатие». Включает авто-AE с приоритетом выдержки
@@ -96,3 +102,6 @@ interface KernCamera {
     /** Освободить ресурсы камеры. */
     fun release()
 }
+
+private val FALLBACK_LIMITS: StateFlow<CameraLimits> =
+    kotlinx.coroutines.flow.MutableStateFlow(CameraLimits.FALLBACK)

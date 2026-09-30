@@ -215,7 +215,7 @@ class ToupcamControllerTest {
         val c = controller()
         c.open(LampType.DAYLIGHT)
         val uf = CameraProfile.defaultFor(LampType.UF)
-        val profile = c.capture(target(), LampType.UF)
+        val profile = c.capture(target(), LampType.UF).profile
         assertEquals(LampType.UF, profile.lampType)
         assertEquals("снимок — с выдержкой УФ", "expo1=${uf.exposureTimeNs / 1000}", expoBefore("snap1"))
         assertEquals(LampType.UF, c.activeProfile.lampType)
@@ -233,7 +233,7 @@ class ToupcamControllerTest {
         assertFalse("Snap посреди смены профиля", rig.has("snap1"))
         rig.setterGate!!.countDown()
         switching.awaitWithin()
-        val profile = shot.awaitWithin()
+        val profile = shot.awaitWithin().profile
         assertEquals(LampType.UF, profile.lampType)
         assertEquals("expo1=${CameraProfile.defaultFor(LampType.UF).exposureTimeNs / 1000}", expoBefore("snap1"))
     }
@@ -248,7 +248,7 @@ class ToupcamControllerTest {
         val shot = async(Dispatchers.IO) { c.capture(target(), LampType.UF) }
         assertTrue(rig.waitFor("expo1=$ufUs"))       // профиль УФ применён, Snap ещё не сделан
         val switching = async(Dispatchers.IO) { c.switchLamp(LampType.DAYLIGHT) }
-        val profile = withTimeout(10_000) { shot.await() }
+        val profile = withTimeout(10_000) { shot.await() }.profile
         switching.awaitWithin()
         assertEquals(LampType.UF, profile.lampType)
         assertEquals("Snap — с параметрами УФ, а не вклинившегося дневного", "expo1=$ufUs", expoBefore("snap1"))
@@ -584,6 +584,68 @@ class ToupcamControllerTest {
         val c = controller()
         c.open(LampType.DAYLIGHT)
         assertTrue(c.lastApplyReport!!.rejected.isEmpty())
+    }
+
+    // ---- R14: границы камеры и аудит снимка ------------------------------------------------
+
+    @Test
+    fun limitsComeFromSdkOrExplicitFallback() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        assertTrue(c.limits.value.exposureUs.fromSdk)
+        assertEquals(5000, c.limits.value.gainPercent.max)
+        c.release()
+
+        rig.gainRange = intArrayOf(0x80004001.toInt(), 0, 0, 0) // SDK диапазон усиления не сообщил
+        val c2 = controller("B")
+        c2.open(LampType.DAYLIGHT)
+        assertFalse(c2.limits.value.gainPercent.fromSdk)
+        assertEquals(CameraLimits.FALLBACK_GAIN_MIN_PERCENT, c2.limits.value.gainPercent.min)
+        assertTrue(c2.limits.value.exposureUs.fromSdk)
+    }
+
+    @Test
+    fun captureAuditSeparatesRequestClampedValuesSetterResultsAndReadback() = runBlocking {
+        rig.gainRange = intArrayOf(0, 100, 800, 100)
+        rig.rejectSetters += "WhiteBalanceGain"
+        // 2000 % > максимума SDK (800 %), но < запасного (5100 %): видно, что применены именно границы камеры.
+        CameraProfileStore(context, json).save(CameraProfile.defaultFor(LampType.DAYLIGHT).copy(iso = 2000, gamma = 500))
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val audit = c.capture(target(), LampType.DAYLIGHT).audit!!
+
+        assertEquals("исходный запрос", 2000, audit.requested.iso)
+        assertEquals(500, audit.requested.gamma)
+        val applied = audit.applied!!
+        assertEquals("после ограничения границами КАМЕРЫ", 800, applied.gainPercent)
+        assertEquals(180, applied.gamma)
+        assertEquals(listOf("AutoExpoEnable", "ExpoTime", "ExpoAGain", "WhiteBalanceGain", "Gamma"), applied.results.keys.toList())
+        assertEquals("0x80004001", applied.results["WhiteBalanceGain"])
+        assertEquals(800, audit.limits.gainPercent.max)
+        val rb = audit.readback!!
+        assertEquals("состояние SDK около снимка", 800, rb.gainPercent)
+        assertEquals(null, rb.wbGain) // SDK не сообщил WB — «неизвестно», а не ноль
+    }
+
+    @Test
+    fun readbackFailureIsUnknownNotRequestedValue() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.failReadState = true
+        val audit = c.capture(target(), LampType.DAYLIGHT).audit!!
+        assertEquals("прочитать не удалось — неизвестно", null, audit.readback)
+        assertTrue(audit.applied != null)
+    }
+
+    @Test
+    fun auditBelongsToTheLampOfTheCapture() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val audit = c.capture(target(), LampType.UF).audit!!   // профиль УФ применяется в этой же операции
+        val uf = CameraProfile.defaultFor(LampType.UF)
+        assertEquals(uf.exposureTimeNs, audit.requested.exposureTimeNs)
+        assertEquals((uf.exposureTimeNs / 1000).toInt(), audit.applied!!.exposureUs)
+        assertEquals((uf.exposureTimeNs / 1000).toInt(), audit.readback!!.exposureUs)
     }
 
     // ---- п.3–5 предыдущего ревью ---------------------------------------------------------

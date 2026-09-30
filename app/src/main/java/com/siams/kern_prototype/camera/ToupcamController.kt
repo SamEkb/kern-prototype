@@ -85,7 +85,12 @@ class ToupcamController internal constructor(
      * снимку»: см. [awaitSettled].
      * Оговорка: это завершение вызовов обёртки; принятие параметров SDK (HRESULT/readback) — R14.
      */
-    private class Applied(val profile: CameraProfile, val boundary: Long) {
+    private class Applied(
+        val profile: CameraProfile,
+        val boundary: Long,
+        /** R14: отчёт этого применения (значения после ограничения и результаты сеттеров). */
+        val report: ToupcamProfileApplier.ApplyReport?,
+    ) {
         /** Кадры превью, ПОСТУПИВШИЕ после [boundary] (считаются в очереди подключения). */
         val framesAfter = java.util.concurrent.atomic.AtomicInteger(0)
     }
@@ -172,6 +177,10 @@ class ToupcamController internal constructor(
                 // R14/R17: модель, прошивка, выбранное still-разрешение — в журнал диагностики.
                 runCatching { Log.i(TAG, "Камера:\n" + dev.describe().trim()) }
             }
+            // R14: границы камеры до применения профиля (чтение только геттерами SDK).
+            val limits = CameraLimits.from(readback(conn))
+            _limits.value = limits
+            Log.i(TAG, "Границы камеры: $limits")
             applyToConnection(conn, profile)
             readback(conn)?.let { Log.i(TAG, "Фактические параметры после подключения: $it") }
             previewBitmap = Bitmap.createBitmap(previewSize.width, previewSize.height, Bitmap.Config.ARGB_8888)
@@ -254,17 +263,23 @@ class ToupcamController internal constructor(
     internal var lastApplyReport: ToupcamProfileApplier.ApplyReport? = null
         private set
 
-    /** Применить профиль и зафиксировать, какие сеттеры SDK его не приняли (R14). */
+    /** R14: границы текущей камеры (из SDK при подключении; до того — запасные). */
+    private val _limits = MutableStateFlow(CameraLimits.FALLBACK)
+    override val limits: StateFlow<CameraLimits> = _limits.asStateFlow()
+
+    /** Применить профиль с границами камеры и зафиксировать результаты сеттеров SDK (R14). */
     private fun applyAndReport(dev: ToupcamDevice, profile: CameraProfile) {
-        val report = ToupcamProfileApplier.apply(dev, profile)
+        val report = ToupcamProfileApplier.apply(dev, profile, _limits.value)
         lastApplyReport = report
         if (report.rejected.isNotEmpty()) Log.w(TAG, "SDK отклонил параметры профиля ${profile.lampType}: ${report.rejected}")
     }
 
     /** R14: вызов SDK в авто-процедуре — операция, аргументы, HRESULT. */
     @kotlinx.serialization.Serializable
-    data class SdkCall(val op: String, val args: String, val hr: String) {
-        val ok: Boolean get() = !hr.startsWith("0x8")
+    data class SdkCall(val op: String, val args: String, val hrValue: Int) {
+        /** HRESULT: неотрицательный — успех (отрицательные бывают и 0x8…, и 0x9…–0xF…). */
+        val ok: Boolean get() = hrValue >= 0
+        val hr: String get() = "0x%08x".format(hrValue)
     }
 
     /** R14: вызовы SDK последней авто-процедуры (AE/AWB) — для журнала диагностики и аудита. */
@@ -274,7 +289,7 @@ class ToupcamController internal constructor(
 
     /** Записать вызов SDK авто-процедуры; поведение не меняется (отказ только фиксируется). */
     private fun sdk(calls: MutableList<SdkCall>, op: String, args: String, hr: Int) {
-        val call = SdkCall(op, args, "0x%08x".format(hr))
+        val call = SdkCall(op, args, hr)
         calls += call
         if (hr < 0) Log.w(TAG, "SDK отклонил $op($args): ${call.hr}") else Log.i(TAG, "SDK $op($args) → ${call.hr}")
     }
@@ -307,7 +322,7 @@ class ToupcamController internal constructor(
         return conn.run { dev ->
             val result = block(dev)
             // Сеттеры выполнены: граница — после них; события, поступившие во время сеттеров, раньше неё.
-            applied = Applied(result, conn.arrivalBoundary())
+            applied = Applied(result, conn.arrivalBoundary(), lastApplyReport)
             result
         }
     }
@@ -317,7 +332,7 @@ class ToupcamController internal constructor(
      * неизвестном исходе прошлого применения — применяется заново) и после его сеттеров пришло
      * [SETTLE_FRAMES] кадров превью. Возвращает применённый профиль.
      */
-    private suspend fun ensureLampApplied(conn: CameraConnection, lampType: LampType): CameraProfile {
+    private suspend fun ensureLampApplied(conn: CameraConnection, lampType: LampType): Applied {
         val current = applied?.takeIf { it.profile.lampType == lampType }
         val ready = current ?: run {
             val profile = profileStore.read(lampType)
@@ -326,7 +341,7 @@ class ToupcamController internal constructor(
             applied ?: error("Профиль не применён")
         }
         awaitSettled(ready)
-        return ready.profile
+        return ready
     }
 
     /**
@@ -425,17 +440,33 @@ class ToupcamController internal constructor(
     }
 
 
-    override suspend fun capture(target: File, lampType: LampType): CameraProfile = opLock.withLock {
+    override suspend fun capture(target: File, lampType: LampType): CaptureOutcome = opLock.withLock {
         withContext(Dispatchers.IO) {
             val conn = connectionForSnap()
-            val profile = ensureLampApplied(conn, lampType) // R10: снимок — с профилем именно этой лампы
+            val ready = ensureLampApplied(conn, lampType) // R10: снимок — с профилем именно этой лампы
+            val profile = ready.profile
+            // R14: всё для аудита — в этой же операции (под opLock): отчёт применения этого профиля,
+            // границы и состояние SDK непосредственно перед Snap.
+            val audit = CaptureAudit(
+                requested = CaptureAudit.Requested(
+                    exposureTimeNs = profile.exposureTimeNs,
+                    iso = profile.iso,
+                    gamma = profile.gamma,
+                    wbRedGain = profile.wbRedGain,
+                    wbGreenGain = (profile.wbGreenEvenGain + profile.wbGreenOddGain) / 2f,
+                    wbBlueGain = profile.wbBlueGain,
+                ),
+                applied = ready.report,
+                limits = _limits.value,
+                readback = readback(conn),
+            )
             val still = snapStillBlocking(conn)
             applyFfcIfConfigured(conn, still, profile) // §2.3: нормализация делением на эталон
             // R09: неудачный compress — ошибка съёмки; R08: файл появляется целиком или никак.
             writeAtomically(target) { out ->
                 still.compress(Bitmap.CompressFormat.JPEG, profile.jpegQuality.coerceIn(1, 100), out)
             }
-            profile
+            CaptureOutcome(profile, audit)
         }
     }
 

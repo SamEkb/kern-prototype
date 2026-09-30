@@ -25,6 +25,10 @@ internal class FakeCameraRig {
     @Volatile var setterGate: CountDownLatch? = null
     @Volatile var pullGate: CountDownLatch? = null
     @Volatile var pullImageGate: CountDownLatch? = null         // медленная отрисовка превью
+    /** readState() бросает (SDK не отвечает) / диапазоны SDK заданы тестом. */
+    @Volatile var failReadState = false
+    @Volatile var expoRange = intArrayOf(0, 100, 15_000_000, 8_000)   // [hr, min, max, def]
+    @Volatile var gainRange = intArrayOf(0, 100, 5000, 100)
     /** SDK не смог сообщить размер кадра превью / снимка. */
     @Volatile var failPreviewSize = false
     @Volatile var failStillSize = false
@@ -161,10 +165,13 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
     override fun awbOnce() = handle("awbOnce") { hr("AwbInit") }
     override fun getWhiteBalanceGain() = handle("getWb") { intArrayOf(0, 0, 0) }
     override fun readState(): IntArray = handle("readState") {
+        if (rig.failReadState) error("SDK не ответил")
         val wbHr = if ("WhiteBalanceGain" in rig.rejectSetters) E_NOTIMPL else 0
+        val e = rig.expoRange
+        val g = rig.gainRange
         intArrayOf(
             0, expoUs, 0, expoUs, 0, gainPct, 0, gammaVal, wbHr, wb[0], wb[1], wb[2], 0, 0,
-            0, 100, 15_000_000, 8_000, 0, 100, 5000, 100, 0, 1, 0, 0,
+            e[0], e[1], e[2], e[3], g[0], g[1], g[2], g[3], 0, 1, 0, 0,
         )
     }
     override fun describe() = "sdk=fake\nmodel=FAKE$id"

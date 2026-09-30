@@ -48,6 +48,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.siams.kern_prototype.camera.CameraControllerState
+import com.siams.kern_prototype.camera.CameraLimits
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.ui.components.LampSwitch
 import com.siams.kern_prototype.ui.theme.Blue
@@ -62,61 +63,6 @@ import com.siams.kern_prototype.ui.theme.Orange30
 import com.siams.kern_prototype.viewmodel.AutoProc
 import com.siams.kern_prototype.viewmodel.CameraProfilesViewModel
 import kotlinx.coroutines.launch
-
-/** Один редактируемый параметр профиля (лейбл, диапазон, чтение/запись, формат значения). */
-private data class ParamSpec(
-    val label: String,
-    val min: Float,
-    val max: Float,
-    val get: (CameraProfile) -> Float,
-    val set: (CameraProfile, Float) -> CameraProfile,
-    val format: (Float) -> String,
-)
-
-private val PARAMS: List<ParamSpec> = listOf(
-    ParamSpec(
-        "Выдержка", 0.5f, 500f,
-        get = { it.exposureTimeNs / 1_000_000f },
-        set = { p, v -> p.copy(exposureTimeNs = (v * 1_000_000).toLong()) },
-        format = { "%.1f мс".format(it) },
-    ),
-    ParamSpec(
-        "Усиление", 25f, 3200f,   // §3.2 Gain (аналог ISO); хранится в поле iso
-        get = { it.iso.toFloat() },
-        set = { p, v -> p.copy(iso = v.toInt()) },
-        format = { "%d".format(it.toInt()) },
-    ),
-    ParamSpec(
-        "Гамма", 20f, 180f,       // §3.3 Gamma, проценты (100 = 1.0); критична для УФ
-        get = { it.gamma.toFloat() },
-        set = { p, v -> p.copy(gamma = v.toInt()) },
-        format = { "%d%%".format(it.toInt()) },
-    ),
-    ParamSpec(
-        "Фокус", 0f, 10f,
-        get = { it.focusDistance },
-        set = { p, v -> p.copy(focusDistance = v) },
-        format = { if (it < 0.05f) "∞" else "%.1f дптр".format(it) },
-    ),
-    ParamSpec(
-        "WB R", 1f, 4f,
-        get = { it.wbRedGain },
-        set = { p, v -> p.copy(wbRedGain = v) },
-        format = { "%.2f".format(it) },
-    ),
-    ParamSpec(
-        "WB G", 1f, 4f,
-        get = { it.wbGreenEvenGain },
-        set = { p, v -> p.copy(wbGreenEvenGain = v, wbGreenOddGain = v) },
-        format = { "%.2f".format(it) },
-    ),
-    ParamSpec(
-        "WB B", 1f, 4f,
-        get = { it.wbBlueGain },
-        set = { p, v -> p.copy(wbBlueGain = v) },
-        format = { "%.2f".format(it) },
-    ),
-)
 
 @Composable
 fun CameraProfilesScreen(
@@ -167,7 +113,9 @@ fun CameraProfilesScreen(
     val cameraReady = cameraState is CameraControllerState.Ready
     val manualSupported = (cameraState as? CameraControllerState.Ready)?.manualSupported ?: true
     val busy = autoProc != AutoProc.NONE
-    val spec = PARAMS[selected]
+    val limits by vm.limits.collectAsStateWithLifecycle()
+    val paramList = remember(limits) { profileParams(limits) }
+    val spec = paramList[selected]
 
     // §4.2: экспорт/импорт профилей через системный выбор файла (SAF).
     val scope = rememberCoroutineScope()
@@ -335,16 +283,21 @@ fun CameraProfilesScreen(
                 style = Body3Bold, color = Color.White,
             )
             Slider(
-                value = spec.get(profile).coerceIn(spec.min, spec.max),
-                valueRange = spec.min..spec.max,
-                onValueChange = { v -> vm.update(spec.set(profile, v)) },
-                enabled = !busy, // R13: ползунок не конкурирует с автонастройкой
+                value = spec.toSlider(spec.get(profile)),
+                valueRange = spec.sliderRange,
+                onValueChange = { t -> vm.update(spec.set(profile, spec.fromSlider(t))) },
+                // R13: не конкурирует с автонастройкой; R14: фиксированный диапазон камеры — не двигается.
+                enabled = !busy && !spec.fixed,
             )
+            // R14: сохранённое значение не переписывается — показываем, что уйдёт в SDK (только для
+            // параметров, чьё отправляемое значение считается так же, как в контроллере).
+            spec.sentToSdkHint(spec.get(profile))?.let { Text(it, style = Body4, color = Orange30) }
+            spec.note?.let { Text(it, style = Body4, color = Gray40) }
             Row(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
             ) {
-                PARAMS.forEachIndexed { i, p ->
+                paramList.forEachIndexed { i, p ->
                     ParamChip(
                         label = p.label,
                         value = p.format(p.get(profile)),

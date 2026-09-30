@@ -64,7 +64,7 @@ class CameraScreenSessionTest {
         }
         override suspend fun applyProfile(profile: CameraProfile) {}
         override suspend fun switchLamp(lampType: LampType) {}
-        override suspend fun capture(target: File, lampType: LampType) = CameraProfile.defaultFor(lampType)
+        override suspend fun capture(target: File, lampType: LampType) = com.siams.kern_prototype.camera.CaptureOutcome(CameraProfile.defaultFor(lampType), audit = null)
         override fun detachSurface(surface: Surface) = synchronized(surfaceLock) {
             if (failDetach) error("отсоединение не удалось")
             if (current === surface) current = null

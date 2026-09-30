@@ -190,6 +190,7 @@ class KernRepository @Inject constructor(
         file: File,
         profile: CameraProfile,
         coreImageType: CoreImageType = CoreImageType.UNKNOWN,
+        audit: com.siams.kern_prototype.camera.CaptureAudit? = null,
     ): TableEntity {
         // R02/R08: кадр целый (полное декодирование) — и его контрольная сумма для сверки перед отправкой.
         val sha256 = withContext(Dispatchers.IO) {
@@ -203,6 +204,7 @@ class KernRepository @Inject constructor(
             if (fileStorage.writeThumbnail(file, thumb)) thumb.absolutePath else null
         }
         val profileJson = json.encodeToString(CameraProfile.serializer(), profile)
+        val auditJson = audit?.let { json.encodeToString(com.siams.kern_prototype.camera.CaptureAudit.serializer(), it) }
         // Заполняются в конце тела транзакции. Исключение из withTransaction (в т.ч. отмена
         // корутины) НЕ доказывает откат: commit мог состояться до доставки результата.
         var table: TableEntity? = null
@@ -229,6 +231,7 @@ class KernRepository @Inject constructor(
                         remoteImageId = null, // перезаливать заново
                         staleRemoteImageId = existing?.staleRemoteImageId, // прежний кадр всё ещё на сервере
                         fileSha256 = sha256,
+                        captureAuditJson = auditJson,
                     ),
                 )
                 markDrillingDirty(t.drillingId)

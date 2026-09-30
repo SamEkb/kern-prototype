@@ -167,6 +167,24 @@ class SaveCaptureTest {
     }
 
     @Test
+    fun captureAuditIsStoredWithTheLayer() = runBlocking {
+        val d = repo.createDrilling("Д", emptyMap())
+        val (id, f) = shot(d)
+        val audit = com.siams.kern_prototype.camera.CaptureAudit(
+            requested = com.siams.kern_prototype.camera.CaptureAudit.Requested(8_000_000L, 25, 100, 1.9f, 1f, 1.7f),
+            applied = com.siams.kern_prototype.camera.ToupcamProfileApplier.ApplyReport(8000, 100, listOf(59, 0, 49), 100,
+                results = mapOf("ExpoAGain" to "0x00000000")),
+            limits = com.siams.kern_prototype.camera.CameraLimits.FALLBACK,
+            readback = null,
+        )
+        val table = repo.saveCapture(d, null, id, LampType.DAYLIGHT, f, profile, audit = audit)
+        val stored = db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT")!!.captureAuditJson!!
+        val decoded = json.decodeFromString(com.siams.kern_prototype.camera.CaptureAudit.serializer(), stored)
+        assertEquals(audit, decoded)
+        assertEquals(null, decoded.readback)
+    }
+
+    @Test
     fun atomicWriteLeavesNoPartialFile() {
         val target = File(context.filesDir, "atomic/x.jpg")
         try {

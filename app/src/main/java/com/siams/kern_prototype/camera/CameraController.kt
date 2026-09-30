@@ -137,7 +137,10 @@ class CameraController @Inject constructor(
      * Снять JPEG максимального качества в [target] (§6.5). Возвращает применённый
      * профиль (для аудита идентичности). Проверяет отключение AE/AWB/AF в CaptureResult.
      */
-    override suspend fun capture(target: File, lampType: LampType): CameraProfile {
+    override suspend fun capture(target: File, lampType: LampType): CaptureOutcome = CaptureOutcome(captureCamera2(target), audit = null)
+
+    /** Снимок Camera2 (запасной путь; аудит параметров SDK Touptek здесь не ведётся). */
+    private suspend fun captureCamera2(target: File): CameraProfile {
         val dev = device ?: error("Камера не открыта")
         val session = session ?: error("Сессия не создана")
         val reader = imageReader ?: error("ImageReader не создан")

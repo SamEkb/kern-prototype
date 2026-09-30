@@ -142,10 +142,11 @@ class CaptureViewModel @Inject constructor(
                 // R05: пересъёмка при идущей отправке — отказ ДО снимка (основная проверка — в
                 // транзакции репозитория, см. saveCapture).
                 repository.checkCanSaveCapture(tableId, lamp)
-                val profile = controller.capture(file, lamp)
+                val outcome = controller.capture(file, lamp)
+                val profile = outcome.profile
                 check(profile.lampType == lamp) { "Профиль снимка не соответствует освещению" }
                 _activeProfile.value = profile
-                val table = repository.saveCapture(drillingId, tableId, layerId, lamp, file, profile)
+                val table = repository.saveCapture(drillingId, tableId, layerId, lamp, file, profile, audit = outcome.audit)
                 if (_tableId.value == tableId) {
                     _tableId.value = table.id
                     _tableNumber.value = table.number
