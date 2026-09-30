@@ -503,7 +503,7 @@ class ToupcamController internal constructor(
      * уменьшаем (усреднение уже подавляет пыль) и слегка размываем — получаем шаблон
      * неравномерности; сохраняем PNG рядом в filesDir (свой на профиль). Путь пишем в профиль.
      */
-    override suspend fun captureFfcReference(lampType: LampType): String = opLock.withLock {
+    override suspend fun captureFfcReference(lampType: LampType): FfcReference = opLock.withLock {
         withContext(Dispatchers.IO) {
             // R21: замер памяти эталона FFC — в журнал (KernMemory); обработка не меняется.
             val probe = MemoryProbe("ffc-reference", memoryReader)
@@ -521,7 +521,12 @@ class ToupcamController internal constructor(
     internal var lastFfcMemory: MemoryTrace? = null
         private set
 
-    private suspend fun captureFfcLocked(lampType: LampType, probe: MemoryProbe): String {
+    /** R22: отчёт проверки последнего эталона FFC (принятого или отклонённого; диагностика). */
+    @Volatile
+    internal var lastFfcQuality: FfcQuality.Report? = null
+        private set
+
+    private suspend fun captureFfcLocked(lampType: LampType, probe: MemoryProbe): FfcReference {
         val conn = connectionForSnap()
         ensureLampApplied(conn, lampType) // эталон — с профилем этой лампы (в редакторе — рабочим)
         probe.mark("applied")
@@ -532,6 +537,15 @@ class ToupcamController internal constructor(
         val template = boxBlur(small, FFC_BLUR_RADIUS, FFC_BLUR_PASSES)
         if (template !== small) small.recycle()
         probe.mark("template")
+        // R22: проверка качества ДО записи файла — по полному кадру и готовому шаблону.
+        val quality = FfcQuality.evaluate(lampType, still, template)
+        lastFfcQuality = quality
+        Log.i(TAG, "FFC ${lampType.name}: ${if (quality.accepted) "принят" else "отклонён"} — ${quality.summary()}")
+        probe.mark("quality")
+        if (!quality.accepted) {
+            template.recycle()
+            throw FfcQuality.RejectedException(quality) // файл не создаётся: прежний эталон не затронут
+        }
         // R11: всегда новый файл — эталон подтверждённого профиля не перезаписывается.
         // Профиль переключится на него только при «Сохранить».
         val file = FfcFiles.newFile(context, lampType)
@@ -540,7 +554,7 @@ class ToupcamController internal constructor(
         synchronized(this@ToupcamController) {
             cachedTemplate = template; cachedTemplatePath = file.absolutePath
         }
-        return file.absolutePath
+        return FfcReference(file.absolutePath, quality)
     }
 
     /**

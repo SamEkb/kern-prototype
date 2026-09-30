@@ -3,6 +3,7 @@ package com.siams.kern_prototype.viewmodel
 import android.graphics.SurfaceTexture
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.siams.kern_prototype.camera.FfcReference
 import com.siams.kern_prototype.camera.CameraControllerState
 import com.siams.kern_prototype.camera.KernCamera
 import com.siams.kern_prototype.camera.UsbDeviceEvents
@@ -195,7 +196,10 @@ class CameraProfilesViewModel @Inject constructor(
      * Запустить процедуру [kind] для выбранной лампы. Результат принимается, только если лампа и
      * ревизия её черновика не изменились с запуска; иначе отбрасывается.
      */
-    private fun runProc(kind: AutoProc, doneMessage: String, block: suspend (CameraProfile, LampType) -> CameraProfile?) {
+    private fun runProc(kind: AutoProc, doneMessage: String, block: suspend (CameraProfile, LampType) -> CameraProfile?) =
+        runProc(kind, { doneMessage }, block)
+
+    private fun runProc(kind: AutoProc, doneMessage: () -> String, block: suspend (CameraProfile, LampType) -> CameraProfile?) {
         if (refuseIfBusy() || !isLoaded()) return
         if (controller.state.value !is CameraControllerState.Ready) {
             _message.value = "Камера не готова"
@@ -215,7 +219,7 @@ class CameraProfilesViewModel @Inject constructor(
                                 _message.value = "Результат автонастройки устарел и не применён"
                             else -> {
                                 setDraft(lamp, result)
-                                _message.value = doneMessage
+                                _message.value = doneMessage()
                             }
                         }
                     }
@@ -249,13 +253,17 @@ class CameraProfilesViewModel @Inject constructor(
      */
     fun confirmFfc() {
         _showFfcInstruction.value = false
-        runProc(AutoProc.FLAT_FIELD, "Эталон FFC снят. Сохраните профиль, чтобы применить.") { base, lamp ->
-            val path = controller.captureFfcReference(lamp)
-            if (path == null) {
+        // R22: непригодный эталон отклоняется камерой (RejectedException → сообщение с причинами);
+        // черновик при этом не меняется — остаётся прежний эталон.
+        var accepted: FfcReference? = null
+        runProc(AutoProc.FLAT_FIELD, { "Эталон FFC снят (${accepted?.quality?.summary()}). Сохраните профиль, чтобы применить." }) { base, lamp ->
+            val ref = controller.captureFfcReference(lamp)
+            if (ref == null) {
                 _message.value = "FFC не поддерживается этой камерой"
                 null
             } else {
-                base.copy(ffcTemplatePath = path)
+                accepted = ref
+                base.copy(ffcTemplatePath = ref.path)
             }
         }
     }

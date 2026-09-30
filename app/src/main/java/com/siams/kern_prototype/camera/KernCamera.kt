@@ -82,8 +82,11 @@ interface KernCamera {
      * к файлу шаблона (его нужно записать в профиль), либо null — если не поддерживается.
      * Коррекция снимков делением на шаблон выполняется внутри [capture] по
      * [CameraProfile.ffcTemplatePath].
+     *
+     * R22: эталон принимается только после проверки качества ([FfcQuality]); непригодный —
+     * [FfcQuality.RejectedException], файл не создаётся.
      */
-    suspend fun captureFfcReference(lampType: LampType): String? = null
+    suspend fun captureFfcReference(lampType: LampType): FfcReference? = null
 
     /**
      * R16: больше не рисовать на [surface]. Блокирует до окончания текущей отрисовки на неё: после
@@ -105,3 +108,6 @@ interface KernCamera {
 
 private val FALLBACK_LIMITS: StateFlow<CameraLimits> =
     kotlinx.coroutines.flow.MutableStateFlow(CameraLimits.FALLBACK)
+
+/** R22: принятый эталон FFC — путь к шаблону и отчёт проверки качества. */
+data class FfcReference(val path: String, val quality: FfcQuality.Report)

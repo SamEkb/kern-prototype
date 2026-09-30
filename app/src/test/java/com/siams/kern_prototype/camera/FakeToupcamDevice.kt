@@ -33,6 +33,8 @@ internal class FakeCameraRig {
     @Volatile var failPreviewSize = false
     @Volatile var failStillSize = false
     @Volatile var stillWH = intArrayOf(8, 6)
+    /** Содержимое полного кадра (R22: эталон FFC разной пригодности). */
+    @Volatile var stillFill: (Bitmap) -> Unit = { it.eraseColor(0xFF808080.toInt()) }
     /** Сеттеры, которые SDK «отклоняет» (E_NOTIMPL), — по имени. */
     val rejectSetters: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
     /** Кадры превью (EVENT_IMAGE) идут, как у живой камеры; false — поток кадров остановлен. */
@@ -132,7 +134,7 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
     override fun pullStillImage(bitmap: Bitmap): Boolean = handle("pull") {
         rig.log += "pullStart$id"
         rig.pullGate?.await(5, TimeUnit.SECONDS)
-        bitmap.eraseColor(0xFF808080.toInt())
+        rig.stillFill(bitmap)
         rig.log += "pullEnd$id"
         true
     }

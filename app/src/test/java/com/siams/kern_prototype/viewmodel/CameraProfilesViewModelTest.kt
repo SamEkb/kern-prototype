@@ -62,8 +62,12 @@ class CameraProfilesViewModelTest {
         override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile {
             started += "awb"; gate?.await(); return current.copy(wbRedGain = 3f)
         }
-        override suspend fun captureFfcReference(lampType: LampType): String {
-            started += "ffc-${lampType.name}"; gate?.await(); return "/ffc/${lampType.name}.png"
+        /** R22: непустой — эталон отклоняется с этим отчётом. */
+        @Volatile var ffcRejection: com.siams.kern_prototype.camera.FfcQuality.Report? = null
+        override suspend fun captureFfcReference(lampType: LampType): com.siams.kern_prototype.camera.FfcReference {
+            started += "ffc-${lampType.name}"; gate?.await()
+            ffcRejection?.let { throw com.siams.kern_prototype.camera.FfcQuality.RejectedException(it) }
+            return com.siams.kern_prototype.camera.FfcReference("/ffc/${lampType.name}.png", ffcReport(lampType, emptyList()))
         }
         override fun release() {}
     }
@@ -187,6 +191,29 @@ class CameraProfilesViewModelTest {
         assertEquals("эталон УФ не попал в дневной профиль", "", vm.working.value.ffcTemplatePath)
     }
 
+
+    /** R22: отклонённый эталон не попадает в черновик — остаётся прежний; причина — в сообщении. */
+    @Test
+    fun rejectedFfcKeepsPreviousTemplateAndExplainsWhy() {
+        waitUntil { vm.loaded.value == LampType.DAYLIGHT }
+        onMain { vm.update(vm.working.value.copy(ffcTemplatePath = "/ffc/old.png")) }
+        camera.ffcRejection = ffcReport(LampType.DAYLIGHT, listOf("пересвет 5.00% пикселей"))
+        onMain { vm.confirmFfc() }
+        waitUntil { camera.started.contains("ffc-DAYLIGHT") && vm.autoProc.value == AutoProc.NONE }
+        assertEquals("/ffc/old.png", vm.working.value.ffcTemplatePath)
+        val msg = vm.message.value.orEmpty()
+        assertTrue(msg, msg.contains("отклонён") && msg.contains("пересвет") && msg.contains("Прежний эталон сохранён"))
+    }
+
+    @Test
+    fun acceptedFfcReportsQualityInMessage() {
+        waitUntil { vm.loaded.value == LampType.DAYLIGHT }
+        onMain { vm.confirmFfc() }
+        waitUntil { camera.started.contains("ffc-DAYLIGHT") && vm.autoProc.value == AutoProc.NONE }
+        assertEquals("/ffc/DAYLIGHT.png", vm.working.value.ffcTemplatePath)
+        assertTrue(vm.message.value.orEmpty(), vm.message.value.orEmpty().contains("медиана"))
+    }
+
     @Test
     fun editsBeforeProfileIsLoadedAreNotAccepted() {
         // Новый VM: профиль лампы ещё грузится — правка от значений по умолчанию недопустима.
@@ -210,3 +237,12 @@ class CameraProfilesViewModelTest {
         assertEquals(AutoProc.NONE, vm.autoProc.value)
     }
 }
+
+/** R22: отчёт проверки эталона для подменной камеры. */
+private fun ffcReport(lamp: LampType, problems: List<String>) = com.siams.kern_prototype.camera.FfcQuality.Report(
+    lamp = lamp, width = 8, height = 6,
+    channels = List(3) { com.siams.kern_prototype.camera.FfcQuality.Channel(128.0, 120, 128, 136, 0.0) },
+    anySaturatedFraction = 0.0, correctionGain = listOf(1.1, 1.1, 1.1),
+    thresholds = com.siams.kern_prototype.camera.FfcQuality.Thresholds.forLamp(lamp),
+    problems = problems,
+)

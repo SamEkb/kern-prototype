@@ -660,6 +660,49 @@ class ToupcamControllerTest {
         assertEquals(5L * 3 * 4, mem.buffers["stillBitmap"])
     }
 
+    private fun ffcFiles() = java.io.File(context.filesDir, "ffc").listFiles()?.map { it.name }?.toSet().orEmpty()
+
+    /** R22: пригодный эталон принимается: файл создан, отчёт проверки возвращён. */
+    @Test
+    fun goodFfcReferenceIsAcceptedWithQualityReport() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val ref = c.captureFfcReference(LampType.DAYLIGHT)
+        assertTrue(File(ref.path).exists())
+        assertTrue(ref.quality.accepted)
+        assertEquals(List(3) { 128 }, ref.quality.channels.map { it.median })
+        assertEquals(listOf("start", "applied", "pulled", "template", "quality", "end:ok"), c.lastFfcMemory!!.phases.map { it.name })
+    }
+
+    /** R22: непригодный эталон (пересвет, тёмный, неравномерный) отклоняется, файл не создаётся. */
+    @Test
+    fun unfitFfcReferencesAreRejectedWithoutWritingAFile() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val cases = mapOf<String, (android.graphics.Bitmap) -> Unit>(
+            "пересвет" to { it.eraseColor(0xFFFFFFFF.toInt()) },
+            "слабый сигнал" to { it.eraseColor(0xFF0A0A0A.toInt()) },
+            "неравномерность" to { b ->          // правая четверть кадра — в тени
+                for (y in 0 until b.height) for (x in 0 until b.width)
+                    b.setPixel(x, y, if (x < b.width * 3 / 4) 0xFFC8C8C8.toInt() else 0xFF1E1E1E.toInt())
+            },
+        )
+        rig.stillWH = intArrayOf(64, 48)
+        c.recover()
+        for ((problem, fill) in cases) {
+            rig.stillFill = fill
+            val before = ffcFiles()
+            try {
+                c.captureFfcReference(LampType.DAYLIGHT); fail(problem)
+            } catch (e: FfcQuality.RejectedException) {
+                assertTrue("$problem: ${e.message}", e.message!!.contains(problem))
+                assertTrue(e.message!!.contains("Прежний эталон сохранён"))
+            }
+            assertEquals("$problem: новый файл эталона не создан", before, ffcFiles())
+            assertFalse(c.lastFfcQuality!!.accepted)
+        }
+    }
+
     @Test
     fun failedCaptureAndFfcReferenceStopTheirProbes() = runBlocking {
         val c = controller()
@@ -671,7 +714,7 @@ class ToupcamControllerTest {
         rig.autoStill = true
         c.captureFfcReference(LampType.DAYLIGHT)
         val ffc = c.lastFfcMemory!!
-        assertEquals(listOf("start", "applied", "pulled", "template", "end:ok"), ffc.phases.map { it.name })
+        assertEquals(listOf("start", "applied", "pulled", "template", "quality", "end:ok"), ffc.phases.map { it.name })
         assertEquals(0, probeThreadsAlive())
     }
 
@@ -759,7 +802,7 @@ class ToupcamControllerTest {
         try { c.captureFfcReference(LampType.DAYLIGHT); fail() } catch (_: IllegalStateException) {}
 
         rig.autoStill = true
-        val path = c.captureFfcReference(LampType.DAYLIGHT)
+        val path = c.captureFfcReference(LampType.DAYLIGHT).path
         assertTrue(rig.indexOf("open3") < rig.indexOf("snap3"))
         assertTrue(File(path).exists())
     }
