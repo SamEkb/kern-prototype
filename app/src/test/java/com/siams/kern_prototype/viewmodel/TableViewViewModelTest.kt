@@ -96,6 +96,22 @@ class TableViewViewModelTest {
         db.close()
     }
 
+    /** «Назад»/«Переснять»: дождаться автосохранения глубин. */
+    private fun leave(v: TableViewViewModel) {
+        val done = java.util.concurrent.CountDownLatch(1)
+        onMain { v.flush { done.countDown() } }
+        assertTrue(done.await(5, TimeUnit.SECONDS))
+    }
+
+    /** Дождаться автосохранения, оставаясь на экране (как «Переснять»). */
+    private fun settle(v: TableViewViewModel) {
+        val done = java.util.concurrent.CountDownLatch(1)
+        onMain { v.flush(leaving = false) { done.countDown() } }
+        assertTrue(done.await(5, TimeUnit.SECONDS))
+    }
+
+    private fun depthDraft() = runBlocking { repo.readDraft(KernRepository.DraftKeys.depth(tableId)) }
+
     @Test
     fun fieldsShowTableDepthsAsPlainDecimals() {
         vm = newVm()
@@ -105,29 +121,97 @@ class TableViewViewModelTest {
     }
 
     @Test
-    fun invalidInputStaysVisibleAndIsNotSaved() {
+    fun invalidInputStaysVisibleIsNotWrittenAndIsRestoredFromDraft() {
         vm = newVm()
         waitUntil { vm.depth.value.loaded }
-        onMain { vm.onDepthChange(Field.UPPER, "12а"); vm.saveDepth() }
+        onMain { vm.onDepthChange(Field.UPPER, "12а") }
         assertEquals("12а", vm.depth.value.upper)
+        settle(vm)
         assertEquals(setOf(Field.UPPER), vm.depth.value.errors.keys)
-        onMain { vm.onDepthChange(Field.UPPER, "1600"); vm.saveDepth() }  // кровля ниже подошвы
+        assertEquals(TableViewViewModel.DepthStatus.INVALID, vm.depth.value.status)
+        onMain { vm.onDepthChange(Field.UPPER, "1600") }   // кровля ниже подошвы
+        settle(vm)
         assertEquals(setOf(Field.LOWER), vm.depth.value.errors.keys)
-        onMain { }
         assertTrue("ничего не записано", layers().all { it.kernUpperDepth == 0.0001 && it.kernLowerDepth == 1500.0 })
-        assertEquals(emptyList<Throwable>(), crashes.toList())
+        assertEquals("1600", depthDraft()!!["upper"])
+
+        val reopened = newVm()                                  // «Назад» и снова в стол
+        waitUntil { reopened.depth.value.loaded }
+        assertTrue(reopened.depth.value.restoredDraft)
+        assertEquals("1600", reopened.depth.value.upper)
+        assertEquals(setOf(Field.LOWER), reopened.depth.value.errors.keys)
+        onMain { reopened.discardDepthDraft() }
+        settle(reopened)
+        assertEquals("0.0001", reopened.depth.value.upper)
+        assertEquals(null, depthDraft())
     }
 
     @Test
-    fun validInputIsWrittenToAllLayersAndHealsMismatch() {
+    fun validInputIsSavedAutomaticallyToAllLayersBeforeReshoot() {
+        vm = newVm()
+        waitUntil { vm.depth.value.loaded }
+        var layersAtReshoot: List<Pair<Double?, Double?>>? = null
+        val done = java.util.concurrent.CountDownLatch(1)
+        onMain {
+            vm.onDepthChange(Field.UPPER, "1520,5")
+            vm.onDepthChange(Field.LOWER, "1530")
+            // «Переснять»: переход — только после записи глубин (новый слой берёт глубины стола).
+            vm.flush { layersAtReshoot = layers().map { it.kernUpperDepth to it.kernLowerDepth }; done.countDown() }
+        }
+        assertTrue(done.await(5, TimeUnit.SECONDS))
+        assertEquals(listOf(1520.5 to 1530.0, 1520.5 to 1530.0), layersAtReshoot)
+        assertEquals(null, depthDraft())
+        assertEquals(TableViewViewModel.DepthStatus.SAVED, vm.depth.value.status)
+    }
+
+    @Test
+    fun mismatchIsHealedOnlyByExplicitAction() {
         // Данные до исправления: у УФ глубин нет.
         val uf = layers().first { it.lampType == LampType.UF }
         runBlocking { db.layerDao().update(uf.copy(kernUpperDepth = null, kernLowerDepth = null)) }
         vm = newVm()
-        waitUntil { vm.depthMismatch.value }
-        onMain { vm.onDepthChange(Field.UPPER, "1520,5"); vm.onDepthChange(Field.LOWER, "1530"); vm.saveDepth() }
-        waitUntil { layers().all { it.kernUpperDepth == 1520.5 && it.kernLowerDepth == 1530.0 } }
+        waitUntil { vm.depthMismatch.value && vm.depth.value.loaded }
+        settle(vm)
+        assertTrue("открытие стола само ничего не подставляет", layers().any { it.kernUpperDepth == null })
+        onMain { vm.applyDepthToAllLayers() }
+        settle(vm)
+        assertTrue(layers().all { it.kernUpperDepth == 0.0001 && it.kernLowerDepth == 1500.0 })
         waitUntil { !vm.depthMismatch.value }
         assertEquals(emptyList<Throwable>(), crashes.toList())
+    }
+
+    /** Ошибка записи глубин: «Переснять» не открывает съёмку со старыми глубинами. */
+    @Test
+    fun failedDepthWriteBlocksReshoot() {
+        vm = newVm()
+        waitUntil { vm.depth.value.loaded }
+        repo.onBeforeDraftClearForTest = { error("сбой записи") }
+        onMain { vm.onDepthChange(Field.UPPER, "1400") }
+        var reshoot = false
+        onMain { vm.flush(leaving = false) { reshoot = true } }
+        waitUntil { !vm.depthBusy.value && vm.message.value != null }
+        assertTrue(!reshoot)
+        assertTrue(layers().all { it.kernUpperDepth == 0.0001 })
+        repo.onBeforeDraftClearForTest = null
+        leave(vm)
+        assertTrue(layers().all { it.kernUpperDepth == 1400.0 })
+    }
+
+    /** Задержанная запись → «Назад» → новый ввод: ввод заблокирован. */
+    @Test
+    fun depthInputDuringDelayedLeaveIsBlocked() {
+        vm = newVm()
+        waitUntil { vm.depth.value.loaded }
+        val gate = java.util.concurrent.CountDownLatch(1)
+        repo.onBeforeDraftClearForTest = { gate.await(5, TimeUnit.SECONDS) }
+        onMain { vm.onDepthChange(Field.UPPER, "1400") }
+        val left = java.util.concurrent.CountDownLatch(1)
+        onMain { vm.flush { left.countDown() } }
+        onMain { vm.onDepthChange(Field.UPPER, "1450") }
+        assertEquals("1400", vm.depth.value.upper)
+        gate.countDown()
+        assertTrue(left.await(5, TimeUnit.SECONDS))
+        repo.onBeforeDraftClearForTest = null
+        assertTrue(layers().all { it.kernUpperDepth == 1400.0 })
     }
 }

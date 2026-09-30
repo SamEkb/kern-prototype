@@ -1,6 +1,7 @@
 package com.siams.kern_prototype.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -84,6 +85,9 @@ fun TableViewScreen(
         }
     }
     LaunchedEffect(closed) { if (closed) onBack() }
+    // R15: выход и «Переснять» дожидаются автосохранения глубин.
+    val leave = { vm.flush(onDone = onBack) }
+    BackHandler(onBack = leave)
 
     var showEditNumber by remember { mutableStateOf(false) }
     var showDeleteTable by remember { mutableStateOf(false) }
@@ -95,7 +99,7 @@ fun TableViewScreen(
             TopAppBar(
                 title = { Text(stringResource(R.string.table_number, t?.table?.number ?: "—")) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = leave) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                     }
                 },
@@ -154,24 +158,27 @@ fun TableViewScreen(
                 label = stringResource(R.string.common_daylight),
                 present = daylight != null,
                 labelColor = Color.White,
-                onReshoot = { onReshoot(drillingId, LampType.DAYLIGHT.name) },
+                onReshoot = { vm.flush(leaving = false) { onReshoot(drillingId, LampType.DAYLIGHT.name) } },
                 onDelete = daylight?.let { { pendingDeleteLayer = it.id } },
             )
             LayerRow(
                 label = stringResource(R.string.common_uf),
                 present = uf != null,
                 labelColor = UvYellow,
-                onReshoot = { onReshoot(drillingId, LampType.UF.name) },
+                onReshoot = { vm.flush(leaving = false) { onReshoot(drillingId, LampType.UF.name) } },
                 onDelete = uf?.let { { pendingDeleteLayer = it.id } },
             )
 
             val depth by vm.depth.collectAsStateWithLifecycle()
+            val depthBusy by vm.depthBusy.collectAsStateWithLifecycle()
             val depthMismatch by vm.depthMismatch.collectAsStateWithLifecycle()
             DepthEditor(
                 depth = depth,
+                busy = depthBusy,
                 mismatch = depthMismatch,
                 onChange = vm::onDepthChange,
-                onSave = vm::saveDepth,
+                onApplyToAll = vm::applyDepthToAllLayers,
+                onDiscard = vm::discardDepthDraft,
             )
         }
     }
@@ -277,16 +284,25 @@ private fun LayerRow(
 @Composable
 private fun DepthEditor(
     depth: TableViewViewModel.DepthState,
+    busy: Boolean,
     mismatch: Boolean,
     onChange: (DepthInput.Field, String) -> Unit,
-    onSave: () -> Unit,
+    onApplyToAll: () -> Unit,
+    onDiscard: () -> Unit,
 ) {
     // R15: текст полей — как введён (во ViewModel); неверный ввод не превращается в «пусто».
     val upperError = depth.errors[DepthInput.Field.UPPER]
     val lowerError = depth.errors[DepthInput.Field.LOWER]
     Text(stringResource(R.string.table_view_depth_hint), style = Body3, color = Gray40)
+    if (depth.restoredDraft) {
+        Text(stringResource(R.string.drilling_form_restored), style = Body3, color = Orange30)
+        TextButton(onClick = onDiscard, enabled = !busy) { Text(stringResource(R.string.drilling_form_discard)) }
+    }
     if (mismatch) {
         Text(stringResource(R.string.table_view_depth_mismatch), style = Body3, color = Orange30)
+        OutlinedButton(onClick = onApplyToAll, enabled = depth.loaded && !busy) {
+            Text(stringResource(R.string.table_view_depth_apply_all))
+        }
     }
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -295,6 +311,7 @@ private fun DepthEditor(
     ) {
         OutlinedTextField(
             value = depth.upper, onValueChange = { onChange(DepthInput.Field.UPPER, it) },
+            enabled = depth.loaded && !busy,
             label = { Text(stringResource(R.string.table_view_depth_upper)) },
             isError = upperError != null,
             supportingText = upperError?.let { { Text(it) } },
@@ -304,6 +321,7 @@ private fun DepthEditor(
         )
         OutlinedTextField(
             value = depth.lower, onValueChange = { onChange(DepthInput.Field.LOWER, it) },
+            enabled = depth.loaded && !busy,
             label = { Text(stringResource(R.string.table_view_depth_lower)) },
             isError = lowerError != null,
             supportingText = lowerError?.let { { Text(it) } },
@@ -311,6 +329,14 @@ private fun DepthEditor(
             keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
             modifier = Modifier.weight(1f),
         )
-        OutlinedButton(onClick = onSave, enabled = depth.loaded) { Text(stringResource(R.string.common_ok)) }
     }
+    // R15: глубины сохраняются автоматически; при ошибке — черновик.
+    Text(
+        stringResource(
+            if (depth.status == TableViewViewModel.DepthStatus.INVALID) R.string.table_view_depth_status_invalid
+            else R.string.drilling_form_status_saved,
+        ),
+        style = Body3,
+        color = if (depth.status == TableViewViewModel.DepthStatus.INVALID) Orange30 else Gray40,
+    )
 }

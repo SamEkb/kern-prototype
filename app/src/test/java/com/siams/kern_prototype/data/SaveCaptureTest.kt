@@ -371,6 +371,62 @@ class SaveCaptureTest {
         assertEquals(5.0 to 6.0, layer.kernUpperDepth to layer.kernLowerDepth)
     }
 
+    /** R15: черновики удалённого стола/долбления не остаются; черновик нового долбления не трогается. */
+    @Test
+    fun draftsOfDeletedTablesAndDrillingsAreRemoved() = runBlocking {
+        val d = repo.createDrilling("Д", emptyMap())
+        val (id1, f1) = shot(d)
+        val t1 = repo.saveCapture(d, null, id1, LampType.DAYLIGHT, f1, profile)
+        val (id2, f2) = shot(d)
+        val t2 = repo.saveCapture(d, null, id2, LampType.DAYLIGHT, f2, profile)
+        val keys = KernRepository.DraftKeys
+        listOf(keys.depth(t1.id), keys.depth(t2.id), keys.passport(d), keys.passport(null))
+            .forEach { repo.writeDraft(it, mapOf("x" to "1")) }
+
+        repo.deleteTable(t1.id)
+        assertNull(repo.readDraft(keys.depth(t1.id)))
+        assertEquals(mapOf("x" to "1"), repo.readDraft(keys.depth(t2.id)))
+
+        repo.deleteDrilling(d)
+        assertNull(repo.readDraft(keys.depth(t2.id)))
+        assertNull(repo.readDraft(keys.passport(d)))
+        assertEquals("черновик нового долбления не относится к удалённому", mapOf("x" to "1"), repo.readDraft(keys.passport(null)))
+    }
+
+    /** R15: сбой между записью данных и удалением черновика откатывает обе операции. */
+    @Test
+    fun dataWriteAndDraftClearAreAtomic() = runBlocking {
+        val keys = KernRepository.DraftKeys
+        repo.onBeforeDraftClearForTest = { error("сбой между записью и удалением черновика") }
+
+        // Правка паспорта.
+        val d = repo.createDrilling("Д", mapOf("well_number" to "1"))
+        val before = repo.getDrilling(d)!!
+        repo.writeDraft(keys.passport(d), mapOf("well_number" to "12а"))
+        try { repo.updateDrilling(d, "Д", mapOf("well_number" to "2"), clearDraftKey = keys.passport(d)); fail() } catch (_: IllegalStateException) {}
+        assertEquals("правка откатилась", before, repo.getDrilling(d))
+        assertEquals("черновик на месте", mapOf("well_number" to "12а"), repo.readDraft(keys.passport(d)))
+
+        // Создание долбления.
+        repo.writeDraft(keys.passport(null), mapOf("__title" to "Новое"))
+        try { repo.createDrilling("Новое", emptyMap(), clearDraftKey = keys.passport(null)); fail() } catch (_: IllegalStateException) {}
+        assertEquals("долбление не создано", listOf(d), db.drillingDao().listIdsByStatus(com.siams.kern_prototype.domain.model.SyncStatus.NOT_SENT))
+        assertEquals(mapOf("__title" to "Новое"), repo.readDraft(keys.passport(null)))
+
+        // Глубины стола.
+        repo.onBeforeDraftClearForTest = null
+        val (id1, f1) = shot(d)
+        val table = repo.saveCapture(d, null, id1, LampType.DAYLIGHT, f1, profile)
+        repo.setLayerDepth(table.id, 5.0, 6.0)
+        repo.writeDraft(keys.depth(table.id), mapOf("upper" to "x"))
+        repo.onBeforeDraftClearForTest = { error("сбой") }
+        try { repo.setLayerDepth(table.id, 7.0, 8.0, clearDraftKey = keys.depth(table.id)); fail() } catch (_: IllegalStateException) {}
+        val layer = db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT")!!
+        assertEquals(5.0 to 6.0, layer.kernUpperDepth to layer.kernLowerDepth)
+        assertEquals(mapOf("upper" to "x"), repo.readDraft(keys.depth(table.id)))
+        repo.onBeforeDraftClearForTest = null
+    }
+
     @Test
     fun atomicWriteLeavesNoPartialFile() {
         val target = File(context.filesDir, "atomic/x.jpg")

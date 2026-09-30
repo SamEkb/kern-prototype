@@ -1,5 +1,7 @@
 package com.siams.kern_prototype.data
 
+import kotlinx.serialization.builtins.serializer
+
 import androidx.annotation.VisibleForTesting
 import androidx.room.withTransaction
 import com.siams.kern_prototype.data.db.KernDatabase
@@ -54,17 +56,23 @@ class KernRepository @Inject constructor(
     suspend fun getDrilling(id: String): DrillingEntity? = drillingDao.getById(id)
 
     /** Создать долбление; id = UUID (он же id AnalysisSource, §7). */
-    suspend fun createDrilling(title: String, passport: Map<String, String>): String {
+    /**
+     * R15: [clearDraftKey] — черновик формы, удаляемый в той же транзакции: после сбоя не может
+     * остаться ни долбление без удалённого черновика, ни удалённый черновик без долбления.
+     */
+    suspend fun createDrilling(title: String, passport: Map<String, String>, clearDraftKey: String? = null): String {
         val id = UUID.randomUUID().toString()
-        drillingDao.upsert(
-            DrillingEntity(
-                id = id,
-                title = title.ifBlank { "Долбление" },
-                passportJson = passportCodec.encode(passport),
-                createdAt = System.currentTimeMillis(),
-                syncStatus = SyncStatus.NOT_SENT,
-            ),
+        val entity = DrillingEntity(
+            id = id,
+            title = title.ifBlank { "Долбление" },
+            passportJson = passportCodec.encode(passport),
+            createdAt = System.currentTimeMillis(),
+            syncStatus = SyncStatus.NOT_SENT,
         )
+        db.withTransaction {
+            drillingDao.upsert(entity)
+            clearDraftKey?.let { clearDraftInTransaction(it) }
+        }
         return id
     }
 
@@ -73,8 +81,13 @@ class KernRepository @Inject constructor(
      * записи — параллельные изменения (remoteId, прогресс, статус отправки) не затираются.
      * Пустое название не меняет текущее.
      */
-    suspend fun updateDrilling(id: String, title: String, passport: Map<String, String>) =
-        drillingDao.updatePassport(id, title.takeIf { it.isNotBlank() }, passportCodec.encode(passport))
+    suspend fun updateDrilling(id: String, title: String, passport: Map<String, String>, clearDraftKey: String? = null) {
+        val json = passportCodec.encode(passport)
+        db.withTransaction {
+            drillingDao.updatePassport(id, title.takeIf { it.isNotBlank() }, json)
+            clearDraftKey?.let { clearDraftInTransaction(it) } // R15: вместе с правкой
+        }
+    }
 
     /**
      * Удалить долбление: сначала запись (каскад столов/слоёв), затем каталог его файлов.
@@ -87,6 +100,7 @@ class KernRepository @Inject constructor(
                 drillingDao.getById(id)?.also {
                     ensureNotSending(id, "удалить долбление")
                     drillingDao.deleteById(id)
+                    db.formDraftDao().deleteOrphans() // R15: черновики долбления и его столов
                 }
             },
             stillExists = { drillingDao.getById(id) != null },
@@ -106,6 +120,44 @@ class KernRepository @Inject constructor(
         stillExists = { drillingDao.getById(id) != null },
         cleanup = { fileStorage.deleteDrillingDir(id) },
     )
+
+    // ---- Черновики форм (R15) -----------------------------------------------------
+
+    /** Ключи черновиков: паспорт долбления ([drillingId] null — новое), глубины стола. */
+    object DraftKeys {
+        fun passport(drillingId: String?) = "passport:${drillingId ?: "new"}"
+        fun depth(tableId: String) = "depth:$tableId"
+    }
+
+    /** Черновик формы [key] (поля как введены) или null. Повреждённый черновик не показывается. */
+    suspend fun readDraft(key: String): Map<String, String>? {
+        val d = db.formDraftDao().get(key) ?: return null
+        return runCatching { json.decodeFromString(DRAFT_SERIALIZER, d.valuesJson) }.getOrNull()
+    }
+
+    suspend fun writeDraft(key: String, values: Map<String, String>) {
+        onDraftWriteForTest?.invoke()
+        db.formDraftDao().upsert(
+            com.siams.kern_prototype.data.db.entity.FormDraftEntity(
+                key, json.encodeToString(DRAFT_SERIALIZER, values), System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    /** Точка для тестов задержки/сбоя записи черновика; в приложении null. */
+    @VisibleForTesting
+    internal var onDraftWriteForTest: (suspend () -> Unit)? = null
+
+    suspend fun clearDraft(key: String) = db.formDraftDao().delete(key)
+
+    private suspend fun clearDraftInTransaction(key: String) {
+        onBeforeDraftClearForTest?.invoke()
+        db.formDraftDao().delete(key)
+    }
+
+    /** Точка для тестов сбоя между записью данных и удалением черновика; в приложении null. */
+    @VisibleForTesting
+    internal var onBeforeDraftClearForTest: (() -> Unit)? = null
 
     fun passportStrings(passportJson: String): Map<String, String> =
         passportCodec.decodeToStrings(passportJson)
@@ -159,6 +211,7 @@ class KernRepository @Inject constructor(
                     ensureNotSending(table.drillingId, "удалить стол")
                     val files = layerDao.listByTable(tableId).flatMap(::filesOf)
                     tableDao.deleteById(tableId)
+                    db.formDraftDao().deleteOrphans() // R15: черновик глубин стола
                     markDrillingDirty(table.drillingId)
                     files
                 }
@@ -406,10 +459,11 @@ class KernRepository @Inject constructor(
      * поля слоёв (в т.ч. remoteImageId, записываемый отправкой) не перезаписываются копией.
      * Метаданные нужно снова доставить PUT'ом (R01).
      */
-    suspend fun setLayerDepth(tableId: String, upper: Double?, lower: Double?) = db.withTransaction {
+    suspend fun setLayerDepth(tableId: String, upper: Double?, lower: Double?, clearDraftKey: String? = null) = db.withTransaction {
         DepthInput.problem(upper, lower)?.let { throw IllegalArgumentException("Глубины стола: $it") } // R15
         layerDao.setDepthByTable(tableId, upper, lower)
         markDrillingDirtyByTable(tableId)
+        clearDraftKey?.let { clearDraftInTransaction(it) } // R15: вместе с записью глубин
         onTransactionBodyEndForTest?.invoke()
     }
 
@@ -492,3 +546,6 @@ private class PreparedLayerFiles(
     val thumbPath: String?,
     val memory: com.siams.kern_prototype.camera.MemoryTrace?,
 )
+
+private val DRAFT_SERIALIZER: kotlinx.serialization.KSerializer<Map<String, String>> =
+    kotlinx.serialization.builtins.MapSerializer(String.serializer(), String.serializer())

@@ -50,7 +50,9 @@
     <string name="table_view_addshoot">Доснять</string>
     <string name="table_view_delete_layer_cd">Удалить слой</string>
     <string name="table_view_depth_hint">Глубина керна по столу (§8.5), м:</string>
-    <string name="table_view_depth_mismatch">Глубины снимков этого стола различаются. Проверьте значения и нажмите «OK», чтобы записать общие глубины для обоих снимков.</string>
+    <string name="table_view_depth_mismatch">Глубины снимков этого стола различаются. Проверьте значения и запишите общие глубины для обоих снимков.</string>
+    <string name="table_view_depth_apply_all">Записать общие глубины</string>
+    <string name="table_view_depth_status_invalid">Есть ошибки — глубины не записаны, ввод сохранён как черновик</string>
     <string name="table_view_depth_upper">Кровля</string>
     <string name="table_view_depth_lower">Подошва</string>
 
@@ -98,6 +100,12 @@
     <string name="drilling_form_simplified">Упрощённый режим: заполняется только название. Остальные паспортные поля дозаполняются в s900 после экспорта. Загрузите конфигурацию полей в настройках для полной формы (§3.3).</string>
     <string name="drilling_form_full">Паспортные поля (гео-схема §8.5) — заполните доступные; остальное дозаполнит s900.</string>
     <string name="drilling_form_create">Создать и снимать</string>
+    <string name="drilling_form_done">Готово</string>
+    <string name="drilling_form_status_saved">Изменения сохраняются автоматически</string>
+    <string name="drilling_form_status_invalid">Есть ошибки — изменения не записаны в паспорт, ввод сохранён как черновик</string>
+    <string name="drilling_form_status_draft">Ввод сохранён как черновик</string>
+    <string name="drilling_form_restored">Восстановлен несохранённый ввод.</string>
+    <string name="drilling_form_discard">Отменить изменения</string>
 
     <!-- Очередь отправки -->
     <string name="send_queue_title">Отправка на сервер</string>

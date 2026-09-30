@@ -121,6 +121,42 @@ class KernMigrationsTest {
     }
 
     @Test
+    fun migrate6To7_keepsDataAndAddsEmptyDraftTable() {
+        val name = "mig6.db"
+        createFromSchema(name, 6) { db ->
+            db.execSQL(
+                """INSERT INTO drilling (id, title, passportJson, createdAt, syncStatus, remoteId, lastError,
+                   uploadedTables, totalTables, editRevision, remoteDestination)
+                   VALUES ('d1', 'Д', '{"well_number":"0012"}', 1, 'NOT_SENT', NULL, NULL, 0, 0, 2, NULL)""",
+            )
+            db.execSQL("INSERT INTO core_table (id, drillingId, number, stackUid) VALUES ('t1', 'd1', 1, 's1')")
+            db.execSQL(
+                """INSERT INTO layer (id, tableId, lampType, filePath, thumbPath, cameraProfileJson, capturedAt,
+                   coreImageType, kernUpperDepth, kernLowerDepth, remoteImageId, metaConfirmed, staleRemoteImageId,
+                   fileSha256, captureAuditJson)
+                   VALUES ('l1', 't1', 'UF', '/f/l1.jpg', NULL, '{}', 2, 'UNKNOWN', 10.0, 12.0, NULL, 0, NULL, 'h', '{"a":1}')""",
+            )
+        }
+        val room = Room.databaseBuilder(context, KernDatabase::class.java, name)
+            .addMigrations(*KernMigrations.ALL).allowMainThreadQueries().build()
+        try {
+            runBlocking {
+                val d = room.drillingDao().getById("d1")!!
+                assertEquals("{\"well_number\":\"0012\"}", d.passportJson)
+                assertEquals(2L, d.editRevision)
+                val l = room.layerDao().getById("l1")!!
+                assertEquals(10.0 to 12.0, l.kernUpperDepth to l.kernLowerDepth)
+                assertEquals("{\"a\":1}", l.captureAuditJson)
+                assertEquals("черновиков у прежней версии нет", null, room.formDraftDao().get("passport:d1"))
+                room.formDraftDao().upsert(com.siams.kern_prototype.data.db.entity.FormDraftEntity("passport:d1", "{}", 5))
+                assertEquals(5L, room.formDraftDao().get("passport:d1")!!.updatedAt)
+            }
+        } finally {
+            room.close()
+        }
+    }
+
+    @Test
     fun migrate5To6_keepsDataAndLeavesAuditMissing() {
         val name = "mig5.db"
         createFromSchema(name, 5) { db ->

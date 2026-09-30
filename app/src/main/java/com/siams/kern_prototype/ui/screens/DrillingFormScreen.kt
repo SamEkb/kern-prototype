@@ -1,5 +1,11 @@
 package com.siams.kern_prototype.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
+import com.siams.kern_prototype.ui.theme.Orange30
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,9 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
@@ -42,20 +46,34 @@ fun DrillingFormScreen(
     onSavedNew: (String) -> Unit,
     vm: DrillingFormViewModel = hiltViewModel(),
 ) {
-    val initial by vm.initial.collectAsStateWithLifecycle()
+    val form by vm.form.collectAsStateWithLifecycle()
+    val loaded by vm.loaded.collectAsStateWithLifecycle()
     val schema by vm.schema.collectAsStateWithLifecycle()
     val errors by vm.errors.collectAsStateWithLifecycle()
+    val status by vm.status.collectAsStateWithLifecycle()
+    val restoredDraft by vm.restoredDraft.collectAsStateWithLifecycle()
+    val message by vm.message.collectAsStateWithLifecycle()
+    // R15: пока идёт выход/создание, ввод заблокирован (изменение не должно потеряться).
+    val busy by vm.busy.collectAsStateWithLifecycle()
+    val editable = loaded && !busy
     val simplified = schema.isEmpty()
+    val values = form.values
 
-    var title by remember(initial.loaded) { mutableStateOf(initial.title) }
-    val values by vm.values.collectAsStateWithLifecycle()
+    // R15: выход с экрана (кнопка и системный «Назад») дожидается автосохранения.
+    val leave = { vm.flush(onBack) }
+    BackHandler(onBack = leave)
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(message) {
+        message?.let { snackbar.showSnackbar(it); vm.consumeMessage() }
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(if (vm.isEditing) R.string.drilling_form_title_edit else R.string.drilling_new)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = leave) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.common_back))
                     }
                 },
@@ -70,12 +88,23 @@ fun DrillingFormScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
         ) {
+            if (restoredDraft) {
+                Text(stringResource(R.string.drilling_form_restored), style = Body3, color = Orange30)
+                if (vm.isEditing) {
+                    TextButton(onClick = vm::discardDraft, enabled = editable) { Text(stringResource(R.string.drilling_form_discard)) }
+                }
+            }
+
+            val titleError = errors[DrillingFormViewModel.TITLE_KEY]
             OutlinedTextField(
-                value = title,
-                onValueChange = { title = it },
+                value = form.title,
+                onValueChange = vm::onTitleChange,
                 label = { Text(stringResource(R.string.drilling_form_name_label)) },
                 placeholder = { Text(stringResource(R.string.drilling_form_name_placeholder)) },
+                isError = titleError != null,
+                supportingText = titleError?.let { { Text(it) } },
                 singleLine = true,
+                enabled = editable,
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -92,6 +121,7 @@ fun DrillingFormScreen(
                     value = values[field.key].orEmpty(),
                     // R15: текст не фильтруется — неверный ввод остаётся видимым и получает ошибку.
                     onValueChange = { input -> vm.onFieldChange(field.key, input) },
+                    enabled = editable,
                     label = { Text(field.ruLabel) },
                     // R15: неверное значение не пропадает молча — ошибка у поля.
                     isError = error != null,
@@ -104,12 +134,26 @@ fun DrillingFormScreen(
                 )
             }
 
+            // R15: правка сохраняется автоматически; статус — под формой.
+            if (vm.isEditing) {
+                Text(
+                    stringResource(
+                        when (status) {
+                            DrillingFormViewModel.SaveStatus.SAVED -> R.string.drilling_form_status_saved
+                            DrillingFormViewModel.SaveStatus.INVALID -> R.string.drilling_form_status_invalid
+                            DrillingFormViewModel.SaveStatus.DRAFT -> R.string.drilling_form_status_draft
+                        },
+                    ),
+                    style = Body3,
+                    color = if (status == DrillingFormViewModel.SaveStatus.INVALID) Orange30 else Gray40,
+                )
+            }
             Button(
-                onClick = { vm.save(title) { id -> if (!vm.isEditing) onSavedNew(id) else onBack() } },
-                enabled = title.isNotBlank(),
+                onClick = { if (vm.isEditing) leave() else vm.create(onSavedNew) },
+                enabled = editable && (vm.isEditing || form.title.isNotBlank()),
                 modifier = Modifier.fillMaxWidth().padding(top = KernTokens.spaceMd),
             ) {
-                Text(stringResource(if (vm.isEditing) R.string.common_save else R.string.drilling_form_create))
+                Text(stringResource(if (vm.isEditing) R.string.drilling_form_done else R.string.drilling_form_create))
             }
         }
     }
