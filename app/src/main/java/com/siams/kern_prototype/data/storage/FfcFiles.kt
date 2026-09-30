@@ -25,6 +25,11 @@ object FfcFiles {
      */
     fun decodeTemplate(path: String): Bitmap? {
         val bytes = runCatching { File(path).readBytes() }.getOrNull() ?: return null
+        return decodeTemplateBytes(bytes)
+    }
+
+    /** То же для байтов PNG (R22: проверка импортируемого эталона тем же загрузчиком, что и коррекция). */
+    fun decodeTemplateBytes(bytes: ByteArray): Bitmap? {
         if (PngCheck.problem(bytes) != null) return null
         return runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
             ?.takeIf { it.config == Bitmap.Config.ARGB_8888 && it.width > 0 && it.height > 0 }

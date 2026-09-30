@@ -77,6 +77,27 @@ class FfcQualityTest {
     }
 
     @Test
+    fun allZeroTemplateChannelIsRejectedSeparatelyFromGain() {
+        val tmpl = bmp(10, 2) { _, _ -> rgb(0, 128, 128) }
+        assertEquals("усиление нулевого канала — 0, проверку усиления оно проходит", 0.0, FfcQuality.correctionGain(tmpl)[0], 0.0)
+        val r = FfcQuality.evaluateTemplate(LampType.DAYLIGHT, tmpl)
+        assertEquals(listOf("нулевой канал шаблона R — коррекция обнулит его в снимках"), r.problems)
+        assertTrue(r.note.contains("не проверяются"))
+        // При съёмке тот же критерий шаблона — вместе с проверками исходного кадра.
+        val shot = FfcQuality.evaluate(LampType.DAYLIGHT, uniform(128), tmpl)
+        assertTrue(shot.problems.toString(), shot.problems.any { it.startsWith("нулевой канал шаблона R") })
+    }
+
+    @Test
+    fun templateOnlyCheckSeesGainButNotSourceSaturation() {
+        // Белый шаблон: исходный кадр мог быть пересвечен, но по шаблону это не установить.
+        assertTrue(FfcQuality.evaluateTemplate(LampType.DAYLIGHT, uniform(255)).accepted)
+        val uneven = bmp(10, 1) { x, _ -> if (x == 0) rgb(20, 20, 20) else rgb(108, 108, 108) }
+        val r = FfcQuality.evaluateTemplate(LampType.UF, uneven)
+        assertTrue(r.problems.single(), r.problems.single().startsWith("неравномерность: усиление коррекции R=4.96, G=4.96, B=4.96"))
+    }
+
+    @Test
     fun percentilesComeFromTheFullFrameHistogram() {
         val hist = LongArray(256).also { it[10] = 1; it[100] = 98; it[250] = 1 }
         assertEquals(10, FfcQuality.percentile(hist, 100, 0.01))

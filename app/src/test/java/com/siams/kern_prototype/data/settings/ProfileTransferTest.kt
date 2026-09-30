@@ -14,6 +14,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -47,6 +48,94 @@ class ProfileTransferTest {
         json.encodeToString(ProfileBundle.serializer(), ProfileBundle(entries = entries.toList()))
 
     private fun ffcFiles(): Set<String> = File(context.filesDir, "ffc").list()?.toSet().orEmpty()
+
+    private fun pngOf(w: Int, h: Int, color: (x: Int, y: Int) -> Int): ByteArray {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) bmp.setPixel(x, y, color(x, y))
+        return ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+    }
+
+    private fun b64(bytes: ByteArray) = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+    /** Сохранённый «подтверждённый» набор обоих профилей с эталонами. */
+    private suspend fun confirmedSet(): Map<LampType, CameraProfile> {
+        val dir = File(context.filesDir, "ffc").apply { mkdirs() }
+        val set = LampType.entries.associateWith { lamp ->
+            val f = File(dir, "confirmed-${lamp.name}-${System.nanoTime()}.png").apply { writeBytes(png(0xFF808080.toInt())) }
+            CameraProfile.defaultFor(lamp).copy(iso = 222, ffcTemplatePath = f.path)
+        }
+        store.saveAll(set.values.toList())
+        return set
+    }
+
+    /** R22: неравномерный импортируемый шаблон отклоняется до записи — весь прежний набор цел. */
+    @Test
+    fun unevenImportedTemplateIsRejectedAndWholeSetIsKept() = runBlocking {
+        val confirmed = confirmedSet()
+        val filesBefore = ffcFiles()
+        val good = pngOf(8, 4) { _, _ -> 0xFF808080.toInt() }
+        val uneven = pngOf(8, 4) { x, _ -> if (x == 0) 0xFF141414.toInt() else 0xFFA0A0A0.toInt() } // край в тени
+        try {
+            transfer.importJson(bundle(
+                ProfileEntry(CameraProfile.defaultFor(LampType.DAYLIGHT).copy(iso = 999), b64(good)),
+                ProfileEntry(CameraProfile.defaultFor(LampType.UF).copy(iso = 999), b64(uneven)),
+            ))
+            fail("ожидался отказ")
+        } catch (e: IllegalArgumentException) {
+            val m = e.message!!
+            assertTrue(m, m.contains("«${LampType.UF.ruLabel}»") && m.contains("неравномерность") && m.contains("текущие профили не изменены"))
+        }
+        LampType.entries.forEach { assertEquals(confirmed[it], store.read(it)) }
+        assertEquals("файлы эталонов не записывались", filesBefore, ffcFiles())
+    }
+
+    /**
+     * R22: равномерный RGB с неодинаковой альфой. Для проверки через getPixels он равномерен
+     * (усиление 1), но коррекция читает RGB, умноженные на альфу, — отказ до каких-либо изменений.
+     */
+    @Test
+    fun templateWithTranslucentPixelsIsRejectedAndWholeSetIsKept() = runBlocking {
+        val confirmed = confirmedSet()
+        val filesBefore = ffcFiles()
+        val translucent = pngOf(8, 4) { x, _ -> if (x == 0) 0x80FFFFFF.toInt() else 0xFFFFFFFF.toInt() }
+        val decoded = FfcFiles.decodeTemplateBytes(translucent)!!
+        assertEquals("по getPixels шаблон равномерный", List(3) { 1.0 },
+            com.siams.kern_prototype.camera.FfcQuality.correctionGain(decoded))
+        try {
+            transfer.importJson(bundle(
+                ProfileEntry(CameraProfile.defaultFor(LampType.DAYLIGHT).copy(iso = 999), b64(png(0xFF808080.toInt()))),
+                ProfileEntry(CameraProfile.defaultFor(LampType.UF).copy(iso = 999), b64(translucent)),
+            ))
+            fail("ожидался отказ")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!, e.message!!.contains("полупрозрачные пиксели (4)") && e.message!!.contains("«${LampType.UF.ruLabel}»"))
+        }
+        LampType.entries.forEach { assertEquals(confirmed[it], store.read(it)) }
+        assertEquals("файлы эталонов не записывались", filesBefore, ffcFiles())
+    }
+
+    /** Непрозрачный шаблон с альфа-каналом в формате принимается: проверяются пиксели, а не формат. */
+    @Test
+    fun opaqueTemplateWithAlphaFormatIsAccepted() = runBlocking {
+        val opaque = pngOf(8, 4) { _, _ -> 0xFFFFFFFF.toInt() }
+        assertTrue(FfcFiles.decodeTemplateBytes(opaque)!!.hasAlpha())
+        assertEquals(1, transfer.importJson(bundle(ProfileEntry(CameraProfile.defaultFor(LampType.DAYLIGHT), b64(opaque)))))
+    }
+
+    /** R22: полностью нулевой канал шаблона обнулил бы канал снимков — отказ (усиление его не ловит). */
+    @Test
+    fun templateWithAllZeroChannelIsRejected() = runBlocking {
+        val confirmed = confirmedSet()
+        val noRed = pngOf(8, 4) { _, _ -> 0xFF008080.toInt() }
+        try {
+            transfer.importJson(bundle(ProfileEntry(CameraProfile.defaultFor(LampType.DAYLIGHT), b64(noRed))))
+            fail("ожидался отказ")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!, e.message!!.contains("нулевой канал шаблона R"))
+            assertFalse(e.message!!, e.message!!.contains("пересвет") || e.message!!.contains("сигнал"))
+        }
+        assertEquals(confirmed[LampType.DAYLIGHT], store.read(LampType.DAYLIGHT))
+    }
 
     @Test
     fun corruptSecondEntryLeavesConfirmedConfigIntact() = runBlocking {

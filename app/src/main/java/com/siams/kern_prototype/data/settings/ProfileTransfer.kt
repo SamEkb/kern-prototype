@@ -2,6 +2,7 @@ package com.siams.kern_prototype.data.settings
 
 import android.content.Context
 import android.util.Base64
+import com.siams.kern_prototype.camera.FfcQuality
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.data.storage.FfcFiles
 import com.siams.kern_prototype.data.storage.PngCheck
@@ -106,6 +107,24 @@ class ProfileTransfer @Inject constructor(
         written.filter { it.absolutePath !in referenced }.forEach { it.delete() }
     }
 
+    /**
+     * R22: пригодность импортируемого шаблона — до записи файлов и изменения профилей. Шаблон
+     * загружается тем же способом, что и для коррекции снимков. Проверяются прозрачность пикселей, нулевые каналы и
+     * усиление коррекции; пересвет и сигнал исходного кадра по шаблону не восстановить.
+     */
+    private fun checkTemplateQuality(lamp: LampType, label: String, bytes: ByteArray) {
+        val bmp = FfcFiles.decodeTemplateBytes(bytes)
+            ?: throw IllegalArgumentException("Профиль «$label»: эталон FFC не читается как шаблон коррекции")
+        val report = try { FfcQuality.evaluateTemplate(lamp, bmp) } finally { bmp.recycle() }
+        if (!report.accepted) {
+            throw IllegalArgumentException(
+                "Профиль «$label»: эталон FFC отклонён: ${report.problems.joinToString("; ")}" +
+                    (if (report.thresholds.provisional) " (пороги предварительные)" else "") +
+                    ". Импорт отменён, текущие профили не изменены.",
+            )
+        }
+    }
+
     /** R11: проверить весь bundle до каких-либо изменений; вернуть профили с декодированными PNG. */
     private fun validate(bundle: ProfileBundle): List<Pair<CameraProfile, ByteArray?>> {
         require(bundle.version == 1) { "Неподдерживаемая версия файла профилей: ${bundle.version}" }
@@ -125,6 +144,7 @@ class ProfileTransfer @Inject constructor(
                 val bytes = runCatching { Base64.decode(b64, Base64.NO_WRAP) }.getOrNull()
                     ?: throw IllegalArgumentException("Профиль «$label»: повреждён эталон FFC")
                 PngCheck.problem(bytes)?.let { throw IllegalArgumentException("Профиль «$label»: эталон FFC — $it") }
+                checkTemplateQuality(p.lampType, label, bytes)
                 bytes
             }
             p to png

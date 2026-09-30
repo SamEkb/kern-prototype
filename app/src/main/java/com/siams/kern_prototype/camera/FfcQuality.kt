@@ -103,27 +103,41 @@ object FfcQuality {
         return hs
     }
 
-    /** Усиление коррекции по шаблону — как у коррекции снимка: среднее / минимум (минимум 0 → 1). */
-    internal fun correctionGain(template: Bitmap): List<Double> {
+    /**
+     * Статистика шаблона по каналам R, G, B. [translucent] — число пикселей с alpha < 255:
+     * [Bitmap.getPixels] отдаёт RGB без умножения на альфу, а нативная коррекция читает память
+     * Bitmap (RGB умножены на альфу) — для таких пикселей проверка видела бы не те значения.
+     */
+    internal class TemplateStats(val mean: List<Double>, val max: List<Int>, val gain: List<Double>, val translucent: Long)
+
+    internal fun templateStats(template: Bitmap): TemplateStats {
         val w = template.width
         val h = template.height
         val px = IntArray(w * h)
         template.getPixels(px, 0, w, 0, 0, w, h)
         val sum = DoubleArray(3)
         val min = IntArray(3) { 255 }
+        val max = IntArray(3)
+        var translucent = 0L
         for (p in px) {
+            if ((p ushr 24) != 0xFF) translucent++
             val c = intArrayOf((p ushr 16) and 0xFF, (p ushr 8) and 0xFF, p and 0xFF)
-            for (k in 0..2) { sum[k] += c[k]; if (c[k] < min[k]) min[k] = c[k] }
+            for (k in 0..2) { sum[k] += c[k]; if (c[k] < min[k]) min[k] = c[k]; if (c[k] > max[k]) max[k] = c[k] }
         }
-        // Коррекция делит на max(t, 1) (jnicam.cpp) — нулевой канал даёт усиление «среднее / 1».
-        return (0..2).map { k -> (sum[k] / px.size) / maxOf(min[k], 1) }
+        val mean = (0..2).map { sum[it] / px.size }
+        // Коррекция делит на max(t, 1) (jnicam.cpp) — нулевой минимум даёт усиление «среднее / 1».
+        return TemplateStats(mean, max.toList(), (0..2).map { k -> mean[k] / maxOf(min[k], 1) }, translucent)
     }
+
+    /** Усиление коррекции по шаблону — как у коррекции снимка: среднее / max(минимум, 1). */
+    internal fun correctionGain(template: Bitmap): List<Double> = templateStats(template).gain
 
     fun evaluate(lamp: LampType, still: Bitmap, template: Bitmap, thresholds: Thresholds = Thresholds.forLamp(lamp)): Report {
         val hs = histograms(still, thresholds.saturationLevel)
         val total = hs.width.toLong() * hs.height
         val channels = hs.hist.map { channel(it, total, thresholds.saturationLevel) }
-        val gains = correctionGain(template)
+        val ts = templateStats(template)
+        val gains = ts.gain
         val anySat = if (total == 0L) 0.0 else hs.anySaturated.toDouble() / total
         return Report(
             lamp = lamp,
@@ -133,11 +147,70 @@ object FfcQuality {
             anySaturatedFraction = anySat,
             correctionGain = gains,
             thresholds = thresholds,
-            problems = problems(channels, anySat, gains, thresholds),
+            problems = problems(channels, anySat, thresholds) + templateProblems(ts, thresholds),
         )
     }
 
-    internal fun problems(channels: List<Channel>, anySat: Double, gains: List<Double>, t: Thresholds): List<String> {
+    /**
+     * R22: проверка готового шаблона без исходного кадра (импорт профиля). Уменьшенный размытый
+     * шаблон не позволяет восстановить пересвет и сигнал исходного кадра — они НЕ проверяются;
+     * проверяются прозрачность пикселей, нулевые каналы и усиление коррекции.
+     */
+    @Serializable
+    data class TemplateReport(
+        val lamp: LampType,
+        val width: Int,
+        val height: Int,
+        val channelMean: List<Double>,
+        val correctionGain: List<Double>,
+        val thresholds: Thresholds,
+        val problems: List<String>,
+        val note: String = "пересвет и сигнал исходного кадра по шаблону не проверяются",
+    ) {
+        val accepted: Boolean get() = problems.isEmpty()
+    }
+
+    fun evaluateTemplate(lamp: LampType, template: Bitmap, thresholds: Thresholds = Thresholds.forLamp(lamp)): TemplateReport {
+        val ts = templateStats(template)
+        return TemplateReport(
+            lamp = lamp,
+            width = template.width,
+            height = template.height,
+            channelMean = ts.mean,
+            correctionGain = ts.gain,
+            thresholds = thresholds,
+            problems = templateProblems(ts, thresholds),
+        )
+    }
+
+    /**
+     * Проверки шаблона: полупрозрачные пиксели (значения для коррекции и для проверки расходятся),
+     * полностью нулевой канал (коррекция умножит канал снимка на 0 — усиление
+     * «среднее / max(0, 1)» = 0 проверку усиления проходит) и усиление коррекции.
+     */
+    internal fun templateProblems(ts: TemplateStats, t: Thresholds): List<String> {
+        val names = listOf("R", "G", "B")
+        val out = mutableListOf<String>()
+        if (ts.translucent > 0) {
+            // Проверяются пиксели, а не наличие альфа-канала в формате.
+            out += "шаблон содержит полупрозрачные пиксели (${ts.translucent}) — коррекция увидит их " +
+                "затемнёнными; нужен непрозрачный эталон"
+        }
+        val zero = ts.max.indices.filter { ts.max[it] == 0 }
+        if (zero.isNotEmpty()) {
+            out += "нулевой канал шаблона " + zero.joinToString(", ") { names[it] } +
+                " — коррекция обнулит его в снимках"
+        }
+        val strong = ts.gain.indices.filter { it !in zero && !(ts.gain[it] <= t.maxCorrectionGain) }
+        if (strong.isNotEmpty()) {
+            out += "неравномерность: усиление коррекции " + strong.joinToString(", ") { "${names[it]}=${fmt(ts.gain[it])}" } +
+                " (допустимо ≤ ${fmt(t.maxCorrectionGain)}) — фон должен заполнять кадр и быть освещён равномерно"
+        }
+        return out
+    }
+
+    /** Проверки исходного кадра (пересвет, сигнал); шаблон — [templateProblems]. */
+    internal fun problems(channels: List<Channel>, anySat: Double, t: Thresholds): List<String> {
         val names = listOf("R", "G", "B")
         val out = mutableListOf<String>()
         if (anySat > t.maxSaturatedFraction) {
@@ -147,11 +220,6 @@ object FfcQuality {
         if (dark.isNotEmpty()) {
             out += "слабый сигнал: медиана " + dark.joinToString(", ") { "${names[it]}=${channels[it].median}" } +
                 " (нужно ≥ ${t.minMedian}) — увеличьте выдержку"
-        }
-        val strong = gains.indices.filter { !(gains[it] <= t.maxCorrectionGain) }
-        if (strong.isNotEmpty()) {
-            out += "неравномерность: усиление коррекции " + strong.joinToString(", ") { "${names[it]}=${fmt(gains[it])}" } +
-                " (допустимо ≤ ${fmt(t.maxCorrectionGain)}) — фон должен заполнять кадр и быть освещён равномерно"
         }
         return out
     }
