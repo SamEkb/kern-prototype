@@ -398,6 +398,114 @@ class ToupcamControllerTest {
         assertTrue("ручной режим возвращён: ${rig.snapshot()}", rig.snapshot().lastIndexOf("ae01") > rig.indexOf("ae11"))
     }
 
+    // ---- R16: восстановление и поверхность превью -----------------------------------------
+
+    @Test
+    fun disconnectedCameraIsRecoveredOnRequest() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.devices[0].listener!!(ToupcamController.EVENT_DISCONNECTED)
+        waitUntilState { it is CameraControllerState.Error && it.canRetry }
+        c.recover()
+        assertTrue(rig.has("open2"))
+        assertTrue(c.state.value is CameraControllerState.Ready)
+        val f = target()
+        c.capture(f, LampType.DAYLIGHT)
+        assertTrue(f.length() > 0)
+    }
+
+    @Test
+    fun failedFirstOpenCanBeRecovered() = runBlocking {
+        rig.failAccess += "1"
+        val c = controller()
+        try { c.open(LampType.DAYLIGHT); fail() } catch (_: IllegalStateException) {}
+        assertTrue(c.state.value is CameraControllerState.Error)
+        c.recover()
+        assertTrue(rig.has("open2"))
+        assertTrue(c.state.value is CameraControllerState.Ready)
+    }
+
+    @Test
+    fun recoverAfterReleaseIsRefused() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        c.release()
+        try { c.recover(); fail("освобождённый контроллер не подключается") } catch (_: IllegalStateException) {}
+        assertFalse(rig.has("access2"))
+    }
+
+    private fun newSurface() = android.view.Surface(android.graphics.SurfaceTexture(0))
+
+    /** detachSurface блокирующий — вызываем в отдельном потоке, чтобы видеть, когда он вернётся. */
+    private fun detachAsync(c: ToupcamController, s: android.view.Surface) =
+        CompletableDeferred<Unit>().also { done -> kotlin.concurrent.thread { c.detachSurface(s); rig.log += "detached"; done.complete(Unit) } }
+
+    @Test
+    fun detachSurfaceWaitsForRunningPreviewDraw() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val surface = newSurface()
+        rig.pullImageGate = CountDownLatch(1)
+        c.startSession(surface)
+        assertTrue(rig.waitFor("pullImageStart1"))   // кадр рисуется на эту поверхность
+        val detaching = detachAsync(c, surface)
+        Thread.sleep(200)
+        assertFalse("поверхность отпущена посреди отрисовки", detaching.isCompleted)
+        rig.pullImageGate!!.countDown()
+        rig.pullImageGate = null
+        detaching.awaitWithin()
+        assertTrue(rig.indexOf("pullImageEnd1") < rig.indexOf("detached"))
+        val before = rig.snapshot().count { it == "pullImage1" }
+        Thread.sleep(200)                            // кадры идут дальше
+        assertEquals("после отключения на поверхность не рисуют", before, rig.snapshot().count { it == "pullImage1" })
+        surface.release()
+    }
+
+    @Test
+    fun detachAfterReleaseStillWaitsForRunningDraw() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val surface = newSurface()
+        rig.pullImageGate = CountDownLatch(1)
+        c.startSession(surface)
+        assertTrue(rig.waitFor("pullImageStart1"))
+        c.release()                                  // подключение закрывается, отрисовка ещё идёт
+        val detaching = detachAsync(c, surface)      // экран уничтожает поверхность
+        Thread.sleep(200)
+        assertFalse("отсоединение не ждёт отрисовку закрывающегося подключения", detaching.isCompleted)
+        rig.pullImageGate!!.countDown()
+        rig.pullImageGate = null
+        detaching.awaitWithin()
+        assertTrue(rig.indexOf("pullImageEnd1") < rig.indexOf("detached"))
+        surface.release()
+    }
+
+    @Test
+    fun lateDetachOfOldSurfaceKeepsNewOne() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val a = newSurface()
+        val b = newSurface()
+        rig.pullImageGate = CountDownLatch(1)
+        c.startSession(a)
+        assertTrue(rig.waitFor("pullImageStart1"))  // рисуем на A
+        val detachingA = detachAsync(c, a)          // уничтожение A задержано отрисовкой
+        val attachingB = async(Dispatchers.IO) { c.startSession(b) }
+        Thread.sleep(100)
+        rig.pullImageGate!!.countDown()
+        rig.pullImageGate = null
+        detachingA.awaitWithin()
+        attachingB.awaitWithin()
+        assertTrue("превью осталось на B", c.currentPreviewSurface === b)
+        c.detachSurface(a)                          // ещё одно запоздалое отсоединение A
+        assertTrue(c.currentPreviewSurface === b)
+        a.release(); b.release()
+    }
+
+    private fun waitUntilState(cond: (CameraControllerState) -> Boolean) = runBlocking {
+        withTimeout(3_000) { while (!cond(controllers.last().state.value)) kotlinx.coroutines.delay(10) }
+    }
+
     // ---- п.3–5 предыдущего ревью ---------------------------------------------------------
 
     /**

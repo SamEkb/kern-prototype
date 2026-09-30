@@ -19,4 +19,14 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * R16/R19: singleTop — подключение USB-камеры при открытом приложении приходит сюда, а не
+     * создаёт второй экземпляр Activity (с ещё одним экраном, претендующим на камеру).
+     * Восстановление подключения запускает сам экран камеры ([com.siams.kern_prototype.camera.UsbDeviceEvents]).
+     */
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
 }

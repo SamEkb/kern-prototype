@@ -65,6 +65,7 @@
     <string name="capture_indicator_done">%1$s ✓</string>
     <string name="capture_manual_unsupported">⚠ Ручной режим (MANUAL_SENSOR) не поддерживается — идентичность не гарантируется (§6.1).</string>
     <string name="capture_camera_error">Камера: %1$s</string>
+    <string name="camera_reconnect">Переподключить камеру</string>
     <string name="capture_in_progress">Снимок… не двигайте лоток</string>
     <string name="capture_shoot_cd">Снять</string>
     <string name="capture_done">"  Готово"</string>

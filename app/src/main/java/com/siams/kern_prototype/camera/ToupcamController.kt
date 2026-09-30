@@ -119,8 +119,13 @@ class ToupcamController internal constructor(
     // освобождается явно (им может ещё пользоваться сохранение снимка) — освободит GC.
     @Volatile private var stillBitmap: Bitmap? = null
     // Поверхность, на которую рисуется превью; [sessionSurface] переживает переподключение.
+    // R16: отрисовка и смена поверхности — под [surfaceLock]: отсоединение ждёт идущую отрисовку.
     @Volatile private var previewSurface: Surface? = null
     @Volatile private var sessionSurface: Surface? = null
+    private val surfaceLock = Any()
+
+    /** Для тестов: поверхность, на которую сейчас рисуется превью. */
+    internal val currentPreviewSurface: Surface? get() = previewSurface
     @Volatile private var frameEvents = 0L
 
     // Кэш загруженного эталона FFC (§2.3), чтобы не декодировать PNG на каждый снимок.
@@ -199,7 +204,7 @@ class ToupcamController internal constructor(
             )
             throw t
         }
-        previewSurface = sessionSurface
+        synchronized(surfaceLock) { previewSurface = sessionSurface }
     }
 
     /** Подключение для снимка: если нужно восстановление — сначала переподключение. */
@@ -208,11 +213,30 @@ class ToupcamController internal constructor(
         return connection ?: error("Камера Touptek не открыта")
     }
 
+    override fun detachSurface(surface: Surface) = synchronized(surfaceLock) {
+        // Отрисовка идёт под этим же замком: к моменту входа сюда она завершена, а новая на эту
+        // поверхность уже не начнётся. Состояние подключения (закрывается/закрыто) не важно.
+        if (sessionSurface === surface) sessionSurface = null
+        if (previewSurface === surface) previewSurface = null
+    }
+
+    /**
+     * R16: восстановление по запросу экрана (кнопка «Переподключить», повторное подключение USB):
+     * закрыть прежнее подключение, если оно есть, и подключиться заново с желаемым профилем.
+     * Под общим замком операций — не пересекается со снимком и применением профиля.
+     */
+    override suspend fun recover() = opLock.withLock {
+        check(!released) { "Камера освобождена" }
+        reconnect()
+    }
+
     override suspend fun startSession(surface: Surface) {
         connection ?: error("Камера Touptek не открыта")
         // Поток кадров уже запущен в open(); достаточно дать поверхность для отрисовки.
-        sessionSurface = surface
-        previewSurface = surface
+        synchronized(surfaceLock) {
+            sessionSurface = surface
+            previewSurface = surface
+        }
     }
 
     override suspend fun applyProfile(profile: CameraProfile) = opLock.withLock { applyLocked(profile) }
@@ -537,19 +561,22 @@ class ToupcamController internal constructor(
                 frameEvents++
                 // R10: кадр засчитывается применению, только если поступил после его границы.
                 applied?.let { if (seq > it.boundary) it.framesAfter.incrementAndGet() }
-                val surface = previewSurface
-                if (surface == null) {
-                    if (frameEvents == 1L || frameEvents % 30 == 0L) {
-                        Log.i(TAG, "EVENT_IMAGE #$frameEvents: previewSurface=null (кадр отброшен)")
-                    }
-                    return
-                }
                 val bmp = previewBitmap ?: return
-                if (frameEvents == 1L || frameEvents % 30 == 0L) {
-                    Log.i(TAG, "EVENT_IMAGE #$frameEvents: рисуем $previewSize")
+                // R16: чтение кадра и отрисовка — под замком поверхности (см. detachSurface).
+                synchronized(surfaceLock) {
+                    val surface = previewSurface
+                    if (surface == null) {
+                        if (frameEvents == 1L || frameEvents % 30 == 0L) {
+                            Log.i(TAG, "EVENT_IMAGE #$frameEvents: previewSurface=null (кадр отброшен)")
+                        }
+                        return
+                    }
+                    if (frameEvents == 1L || frameEvents % 30 == 0L) {
+                        Log.i(TAG, "EVENT_IMAGE #$frameEvents: рисуем $previewSize")
+                    }
+                    dev.pullImage(bmp)
+                    blit(bmp, surface)
                 }
-                dev.pullImage(bmp)
-                blit(bmp, surface)
             }
 
             EVENT_STILLIMAGE -> {

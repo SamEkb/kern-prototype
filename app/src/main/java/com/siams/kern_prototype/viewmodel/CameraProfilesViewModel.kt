@@ -1,11 +1,11 @@
 package com.siams.kern_prototype.viewmodel
 
 import android.graphics.SurfaceTexture
-import android.view.Surface
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.siams.kern_prototype.camera.CameraControllerState
 import com.siams.kern_prototype.camera.KernCamera
+import com.siams.kern_prototype.camera.UsbDeviceEvents
 import com.siams.kern_prototype.data.settings.CameraProfileStore
 import com.siams.kern_prototype.data.settings.ProfileTransfer
 import com.siams.kern_prototype.domain.model.CameraProfile
@@ -38,6 +38,7 @@ class CameraProfilesViewModel @Inject constructor(
     private val store: CameraProfileStore,
     private val transfer: ProfileTransfer,
     val controller: KernCamera,
+    usbEvents: UsbDeviceEvents,
 ) : ViewModel() {
 
     private val _lamp = MutableStateFlow(LampType.DAYLIGHT)
@@ -99,8 +100,13 @@ class CameraProfilesViewModel @Inject constructor(
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
-    private var pendingSurface: SurfaceTexture? = null
-    private var opened = false
+    // R16: подключение, его повтор, поверхность превью, восстановление по USB.
+    private val session = CameraScreenSession(
+        controller, viewModelScope, usbEvents,
+        lamp = { _lamp.value },
+        onMessage = { _message.value = it },
+        afterSession = { runCatching { controller.applyProfile(_working.value) } },
+    )
 
     /** Идёт авто-процедура — конфликтующие действия запрещены (R13). */
     val isBusy: Boolean get() = _autoProc.value != AutoProc.NONE
@@ -116,34 +122,19 @@ class CameraProfilesViewModel @Inject constructor(
     }
 
     /** Вызвать при входе на экран: подключить USB-камеру Touptek (запрос USB-доступа — внутри). */
-    fun start() {
-        if (opened) return
-        opened = true
-        viewModelScope.launch {
-            runCatching { controller.open(_lamp.value) }
-                .onSuccess { startSessionIfReady() }
-                .onFailure { _message.value = it.message }
-        }
-    }
+    fun start() = session.start()
 
-    fun onSurfaceAvailable(surfaceTexture: SurfaceTexture) {
-        pendingSurface = surfaceTexture
-        viewModelScope.launch { startSessionIfReady() }
-    }
+    /** R16: «Переподключить» после ошибки/отключения камеры. */
+    fun reconnect() = session.reconnect()
 
-    fun onSurfaceDestroyed() {
-        pendingSurface = null
-    }
+    fun onSurfaceAvailable(surfaceTexture: SurfaceTexture) = session.onSurfaceAvailable(surfaceTexture)
 
-    private suspend fun startSessionIfReady() {
-        val st = pendingSurface ?: return
-        val state = controller.state.value as? CameraControllerState.Ready ?: return
-        st.setDefaultBufferSize(state.previewSize.width, state.previewSize.height)
-        runCatching {
-            controller.startSession(Surface(st))
-            controller.applyProfile(_working.value)
-        }.onFailure { _message.value = it.message }
-    }
+    fun onSurfaceDestroyed(surfaceTexture: SurfaceTexture): Boolean = session.onSurfaceDestroyed(surfaceTexture)
+
+    /** R16: экран ушёл в фон / вернулся — поверхность отсоединяется и подключается явно. */
+    fun onStop() = session.onStop()
+
+    fun onStart() = session.onStart()
 
     // ---- Черновики (R23) ----------------------------------------------------------------
 

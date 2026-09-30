@@ -60,6 +60,19 @@ fun CaptureScreen(
     val context = LocalContext.current
     // USB-камера Touptek подключается внутри контроллера (запрос USB-доступа — системный).
     LaunchedEffect(Unit) { vm.start() }
+    // R16: уход в фон/возврат — явное отсоединение и подключение поверхности превью.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> vm.onStop()
+                androidx.lifecycle.Lifecycle.Event.ON_START -> vm.onStart()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val lamp by vm.lamp.collectAsStateWithLifecycle()
     val tableNumber by vm.tableNumber.collectAsStateWithLifecycle()
@@ -92,9 +105,9 @@ fun CaptureScreen(
                             vm.onSurfaceAvailable(s)
 
                         override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {}
-                        override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean {
-                            vm.onSurfaceDestroyed(); return true
-                        }
+                        // R16: текстуру освобождает VM — после того, как камера перестала на неё рисовать.
+                        override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean =
+                            vm.onSurfaceDestroyed(s)
 
                         override fun onSurfaceTextureUpdated(s: SurfaceTexture) {}
                     }
@@ -138,6 +151,10 @@ fun CaptureScreen(
             }
             (cameraState as? CameraControllerState.Error)?.let {
                 Text(stringResource(R.string.capture_camera_error, it.message), style = Body4, color = Orange30)
+                // R16: повтор подключения без выхода с экрана.
+                OutlinedButton(onClick = vm::reconnect, enabled = !capturing) {
+                    Text(stringResource(R.string.camera_reconnect), color = Color.White)
+                }
             }
         }
 

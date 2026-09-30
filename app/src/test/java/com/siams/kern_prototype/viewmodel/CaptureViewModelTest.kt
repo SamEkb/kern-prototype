@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.siams.kern_prototype.TestJpeg
 import com.siams.kern_prototype.camera.CameraControllerState
 import com.siams.kern_prototype.camera.KernCamera
+import com.siams.kern_prototype.camera.UsbDeviceEvents
 import com.siams.kern_prototype.data.KernRepository
 import com.siams.kern_prototype.data.PassportCodec
 import com.siams.kern_prototype.data.db.KernDatabase
@@ -22,10 +23,14 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -48,15 +53,36 @@ class CaptureViewModelTest {
     private lateinit var db: KernDatabase
     private lateinit var repo: KernRepository
 
+    /** USB-события, которые тест посылает сам. */
+    private class FakeUsbEvents(context: Context) : UsbDeviceEvents(context) {
+        val events = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+        override val attached: kotlinx.coroutines.flow.Flow<Unit> get() = events
+    }
+
     /** Камера, у которой снимок ждёт [release]; записывает освещение каждого снимка. */
     private class SlowCamera : KernCamera {
+        @Volatile var openFailures = 0
+        val calls = java.util.Collections.synchronizedList(mutableListOf<String>())
         val release = CompletableDeferred<Unit>()
         val started = CompletableDeferred<Unit>()
         val switches = mutableListOf<LampType>()
-        override val state = MutableStateFlow<CameraControllerState>(CameraControllerState.Ready(android.util.Size(8, 6), true))
+        override val state = MutableStateFlow<CameraControllerState>(CameraControllerState.Idle)
         override val activeProfile get() = CameraProfile.defaultFor(LampType.DAYLIGHT)
-        override suspend fun open(lampType: LampType) {}
-        override suspend fun startSession(surface: android.view.Surface) {}
+        override suspend fun open(lampType: LampType) {
+            calls += "open"
+            if (openFailures > 0) {
+                openFailures--
+                state.value = CameraControllerState.Error("нет камеры")
+                error("USB-камера не найдена")
+            }
+            state.value = CameraControllerState.Ready(android.util.Size(8, 6), true)
+        }
+        override suspend fun recover() {
+            calls += "recover"
+            state.value = CameraControllerState.Ready(android.util.Size(8, 6), true)
+        }
+        override fun detachSurface(surface: android.view.Surface) { calls += "detach" }
+        override suspend fun startSession(surface: android.view.Surface) { calls += "session" }
         override suspend fun applyProfile(profile: CameraProfile) {}
         override suspend fun switchLamp(lampType: LampType) { switches += lampType }
         override suspend fun capture(target: File, lampType: LampType): CameraProfile {
@@ -68,6 +94,63 @@ class CaptureViewModelTest {
         override fun release() {}
     }
 
+    private val usb by lazy { FakeUsbEvents(context) }
+
+    private fun newVm(camera: SlowCamera): CaptureViewModel {
+        lateinit var vm: CaptureViewModel
+        val drillingId = runBlocking { repo.createDrilling("Д", emptyMap()) }
+        onMain { vm = CaptureViewModel(repo, camera, SavedStateHandle(mapOf(Routes.ARG_DRILLING_ID to drillingId)), usb).also { vms += it } }
+        return vm
+    }
+
+    private fun waitUntil(ms: Long = 3000, cond: () -> Boolean) {
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) { if (main.submit<Boolean> { cond() }.get()) return; Thread.sleep(10) }
+        throw AssertionError("условие не выполнено за $ms мс")
+    }
+
+    @Test
+    fun failedConnectionCanBeRetriedFromScreen() {
+        val camera = SlowCamera().apply { openFailures = 1 }
+        val vm = newVm(camera)
+        onMain { vm.start() }
+        waitUntil { vm.cameraState.value is CameraControllerState.Error && vm.message.value != null }
+        onMain { vm.start() }                        // повторный вход не блокируется...
+        waitUntil { vm.cameraState.value is CameraControllerState.Ready }
+        assertEquals(listOf("open", "open"), camera.calls.filter { it == "open" })
+        onMain { vm.reconnect() }                    // ...а после успеха «Переподключить» = recover
+        waitUntil { camera.calls.contains("recover") }
+    }
+
+    @Test
+    fun usbAttachRecoversOnlyCameraInError() {
+        val camera = SlowCamera()
+        val vm = newVm(camera)
+        onMain { vm.start() }
+        waitUntil { vm.cameraState.value is CameraControllerState.Ready }
+        usb.events.tryEmit(Unit)                     // камера исправна — не трогаем
+        Thread.sleep(200)
+        assertFalse(camera.calls.contains("recover"))
+        camera.state.value = CameraControllerState.Error("Камера Touptek отключена", canRetry = true)
+        usb.events.tryEmit(Unit)                     // подключили снова
+        waitUntil { camera.calls.contains("recover") }
+        waitUntil { vm.cameraState.value is CameraControllerState.Ready }
+    }
+
+    @Test
+    fun destroyedSurfaceIsDetachedAndTextureKeptForVm() {
+        val camera = SlowCamera()
+        val vm = newVm(camera)
+        onMain { vm.start() }
+        waitUntil { vm.cameraState.value is CameraControllerState.Ready }
+        val texture = android.graphics.SurfaceTexture(0)
+        onMain { vm.onSurfaceAvailable(texture) }
+        waitUntil { camera.calls.contains("session") }
+        val released = main.submit<Boolean> { vm.onSurfaceDestroyed(texture) }.get()
+        assertFalse("текстуру освобождает VM после отключения камеры от неё", released)
+        waitUntil { camera.calls.contains("detach") }
+    }
+
     @Before
     fun setUp() {
         Dispatchers.setMain(main.asCoroutineDispatcher())
@@ -75,8 +158,13 @@ class CaptureViewModelTest {
         repo = KernRepository(db, db.drillingDao(), db.tableDao(), db.layerDao(), FileStorage(context), PassportCodec(json), json)
     }
 
+    /** Все созданные VM: их корутины останавливаются до сброса Dispatchers.Main. */
+    private val vms = java.util.Collections.synchronizedList(mutableListOf<androidx.lifecycle.ViewModel>())
+
     @After
     fun tearDown() {
+        onMain { vms.forEach { it.viewModelScope.cancel() } }
+        onMain { }                                     // главный поток опустел
         Dispatchers.resetMain()
         main.shutdown()
         db.close()
@@ -89,7 +177,7 @@ class CaptureViewModelTest {
         val drillingId = repo.createDrilling("Д", emptyMap())
         val camera = SlowCamera()
         lateinit var vm: CaptureViewModel
-        onMain { vm = CaptureViewModel(repo, camera, SavedStateHandle(mapOf(Routes.ARG_DRILLING_ID to drillingId))) }
+        onMain { vm = CaptureViewModel(repo, camera, SavedStateHandle(mapOf(Routes.ARG_DRILLING_ID to drillingId)), usb).also { vms += it } }
 
         onMain { vm.capture() }
         withTimeout(3_000) { camera.started.await() }

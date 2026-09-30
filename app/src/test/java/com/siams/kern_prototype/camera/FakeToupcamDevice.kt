@@ -24,6 +24,7 @@ internal class FakeCameraRig {
     @Volatile var snapGate: CountDownLatch? = null
     @Volatile var setterGate: CountDownLatch? = null
     @Volatile var pullGate: CountDownLatch? = null
+    @Volatile var pullImageGate: CountDownLatch? = null         // медленная отрисовка превью
     /** Кадры превью (EVENT_IMAGE) идут, как у живой камеры; false — поток кадров остановлен. */
     @Volatile var previewFrames = true
     @Volatile var frameIntervalMs = 20L
@@ -110,7 +111,13 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
         true
     }
 
-    override fun pullImage(bitmap: Bitmap) = handle("pullImage") {}
+    override fun pullImage(bitmap: Bitmap) = handle("pullImage") {
+        rig.log += "pullImage$id"
+        val gate = rig.pullImageGate ?: return@handle
+        rig.log += "pullImageStart$id"
+        gate.await(5, TimeUnit.SECONDS)
+        rig.log += "pullImageEnd$id"
+    }
 
     override fun pullStillImage(bitmap: Bitmap): Boolean = handle("pull") {
         rig.log += "pullStart$id"

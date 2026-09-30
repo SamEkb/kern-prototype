@@ -12,6 +12,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
@@ -70,12 +72,17 @@ class CameraProfilesViewModelTest {
     fun setUp() {
         Dispatchers.setMain(main.asCoroutineDispatcher())
         camera = FakeCamera()
-        onMain { vm = CameraProfilesViewModel(store, ProfileTransfer(context, json, store), camera) }
+        onMain { vm = CameraProfilesViewModel(store, ProfileTransfer(context, json, store), camera, com.siams.kern_prototype.camera.UsbDeviceEvents(context)).also { vms += it } }
         waitUntil { vm.loaded.value == LampType.DAYLIGHT }
     }
 
+    /** Все созданные VM: их корутины останавливаются до сброса Dispatchers.Main. */
+    private val vms = java.util.Collections.synchronizedList(mutableListOf<androidx.lifecycle.ViewModel>())
+
     @After
     fun tearDown() {
+        onMain { vms.forEach { it.viewModelScope.cancel() } }
+        onMain { }                                     // главный поток опустел
         Dispatchers.resetMain()
         main.shutdown()
     }
@@ -185,7 +192,7 @@ class CameraProfilesViewModelTest {
         // Новый VM: профиль лампы ещё грузится — правка от значений по умолчанию недопустима.
         lateinit var fresh: CameraProfilesViewModel
         onMain {
-            fresh = CameraProfilesViewModel(store, ProfileTransfer(context, json, store), camera)
+            fresh = CameraProfilesViewModel(store, ProfileTransfer(context, json, store), camera, com.siams.kern_prototype.camera.UsbDeviceEvents(context)).also { vms += it }
             fresh.update(fresh.working.value.copy(iso = 999)) // до загрузки
         }
         waitUntil { fresh.loaded.value == LampType.DAYLIGHT }

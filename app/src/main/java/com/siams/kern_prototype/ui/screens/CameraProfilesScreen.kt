@@ -126,6 +126,19 @@ fun CameraProfilesScreen(
     val context = LocalContext.current
     // USB-камера Touptek подключается внутри контроллера (запрос USB-доступа — системный).
     LaunchedEffect(Unit) { vm.start() }
+    // R16: уход в фон/возврат — явное отсоединение и подключение поверхности превью.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> vm.onStop()
+                androidx.lifecycle.Lifecycle.Event.ON_START -> vm.onStart()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val lamp by vm.lamp.collectAsStateWithLifecycle()
     val profile by vm.working.collectAsStateWithLifecycle()
@@ -198,9 +211,9 @@ fun CameraProfilesScreen(
                             vm.onSurfaceAvailable(s)
 
                         override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {}
-                        override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean {
-                            vm.onSurfaceDestroyed(); return true
-                        }
+                        // R16: текстуру освобождает VM — после того, как камера перестала на неё рисовать.
+                        override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean =
+                            vm.onSurfaceDestroyed(s)
 
                         override fun onSurfaceTextureUpdated(s: SurfaceTexture) {}
                     }
@@ -213,6 +226,19 @@ fun CameraProfilesScreen(
                 color = Color.White, style = Body2Bold,
                 modifier = Modifier.align(Alignment.Center),
             )
+        }
+        // R16: ошибка/отключение камеры — повтор подключения без выхода с экрана.
+        (cameraState as? CameraControllerState.Error)?.let { err ->
+            Column(
+                modifier = Modifier.align(Alignment.Center).padding(KernTokens.spaceLg),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
+            ) {
+                Text(err.message, color = Orange30, style = Body3Bold, textAlign = TextAlign.Center)
+                OutlinedButton(onClick = vm::reconnect, enabled = autoProc == AutoProc.NONE) {
+                    Text(androidx.compose.ui.res.stringResource(com.siams.kern_prototype.R.string.camera_reconnect), color = Color.White)
+                }
+            }
         }
 
         // Верх: назад, заголовок, выбор редактируемого профиля.
