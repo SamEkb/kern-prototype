@@ -38,15 +38,22 @@ internal interface ToupcamDevice {
      */
     fun applyFlatField(still: Bitmap, template: Bitmap): Boolean
 
-    // Параметры профиля и авто-процедуры (§2, §6) — без изменений относительно CamLib.
-    fun setAutoExpoEnable(mode: Int)
-    fun setExpoTime(microseconds: Int)
-    fun setExpoAGain(percent: Int)
-    fun setWhiteBalanceGain(r: Int, g: Int, b: Int)
-    fun setGamma(gamma: Int)
-    fun setMaxAutoExpoTimeAGain(maxTimeUs: Int, maxGainPercent: Int)
+    // Параметры профиля и авто-процедуры (§2, §6). R14: сеттеры возвращают HRESULT SDK
+    // (0 — принят; иначе — нет, например E_NOTIMPL).
+    fun setAutoExpoEnable(mode: Int): Int
+    fun setExpoTime(microseconds: Int): Int
+    fun setExpoAGain(percent: Int): Int
+    fun setWhiteBalanceGain(r: Int, g: Int, b: Int): Int
+    fun setGamma(gamma: Int): Int
+    fun setMaxAutoExpoTimeAGain(maxTimeUs: Int, maxGainPercent: Int): Int
     fun getExpoTime(): Int
     fun getExpoAGain(): Int
-    fun awbOnce()
+    fun awbOnce(): Int
     fun getWhiteBalanceGain(): IntArray
+
+    /** R14: фактическое состояние параметров — см. [CameraReadback.parse]. */
+    fun readState(): IntArray
+
+    /** R14/R17: сведения о модели/прошивке для журнала диагностики. */
+    fun describe(): String
 }

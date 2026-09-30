@@ -27,27 +27,44 @@ object ToupcamProfileApplier {
     const val GAMMA_MAX = 180                     // TOUPCAM_GAMMA_MAX
     const val GAMMA_DEF = 100                     // TOUPCAM_GAMMA_DEF (1.0)
 
-    internal fun apply(cam: ToupcamDevice, profile: CameraProfile) {
+    /**
+     * R14: что отправлено в SDK (нативные значения) и какие сеттеры SDK отклонил (HRESULT).
+     * Отказ сеттера снимок не останавливает — он фиксируется для диагностики и аудита.
+     */
+    @kotlinx.serialization.Serializable
+    data class ApplyReport(
+        val exposureUs: Int,
+        val gainPercent: Int,
+        val wbGain: List<Int>,
+        val gamma: Int,
+        /** Сеттер → HRESULT (hex) для отклонённых; пусто — все приняты. */
+        val rejected: Map<String, String> = emptyMap(),
+    )
+
+    internal fun apply(cam: ToupcamDevice, profile: CameraProfile): ApplyReport {
+        val rejected = linkedMapOf<String, String>()
+        fun check(name: String, hr: Int) {
+            if (hr < 0) rejected[name] = "0x%08x".format(hr)
+        }
         // Автоэкспозиция — OFF (детерминизм, §6.2).
-        cam.setAutoExpoEnable(0)
+        check("AutoExpoEnable", cam.setAutoExpoEnable(0))
 
         val us = (profile.exposureTimeNs / 1_000L).coerceIn(EXPO_MIN_US.toLong(), EXPO_MAX_US.toLong()).toInt()
-        cam.setExpoTime(us)
+        check("ExpoTime", cam.setExpoTime(us))
 
         // ISO трактуем как процент усиления (ISO 100 → 100 % = 1.0x).
         val gain = profile.iso.coerceIn(GAIN_MIN_PERCENT, GAIN_MAX_PERCENT)
-        cam.setExpoAGain(gain)
+        check("ExpoAGain", cam.setExpoAGain(gain))
 
         // WB: относительные множители R/B к зелёному → знаковые gain'ы Touptek.
         val green = ((profile.wbGreenEvenGain + profile.wbGreenOddGain) / 2f).coerceAtLeast(0.01f)
-        cam.setWhiteBalanceGain(
-            toWbGain(profile.wbRedGain / green),
-            0,
-            toWbGain(profile.wbBlueGain / green),
-        )
+        val wb = listOf(toWbGain(profile.wbRedGain / green), 0, toWbGain(profile.wbBlueGain / green))
+        check("WhiteBalanceGain", cam.setWhiteBalanceGain(wb[0], wb[1], wb[2]))
 
         // Гамма (§3.3) — тональная кривая, критична для УФ.
-        cam.setGamma(profile.gamma.coerceIn(GAMMA_MIN, GAMMA_MAX))
+        val gamma = profile.gamma.coerceIn(GAMMA_MIN, GAMMA_MAX)
+        check("Gamma", cam.setGamma(gamma))
+        return ApplyReport(us, gain, wb, gamma, rejected)
     }
 
     /**

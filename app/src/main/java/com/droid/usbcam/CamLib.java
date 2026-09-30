@@ -75,11 +75,11 @@ public class CamLib {
     /** Запустить полнокадровый снимок → придёт EVENT_STILLIMAGE. false — SDK отклонил Snap. */
     public native boolean snap();
 
-    public native void setAutoExpoEnable(int mode);         // 0 = ручная экспозиция
+    public native int setAutoExpoEnable(int mode);         // 0 = ручная экспозиция
 
     // --- Авто-процедуры (§2.1/§2.2) ---
     /** Лимиты авто-AE: макс. выдержка (мкс) и макс. усиление (%). §2.1 (приоритет выдержки). */
-    public native void setMaxAutoExpoTimeAGain(int maxTimeUs, int maxGainPercent);
+    public native int setMaxAutoExpoTimeAGain(int maxTimeUs, int maxGainPercent);
 
     /** Текущая выдержка, мкс (для чтения результата авто-AE). */
     public native int getExpoTime();
@@ -88,7 +88,7 @@ public class CamLib {
     public native int getExpoAGain();
 
     /** Однократный автобаланс белого (§2.2). Результат — через {@link #getWhiteBalanceGain()}. */
-    public native void awbOnce();
+    public native int awbOnce();
 
     /** Поканальные усиления WB (знаковые R,G,B, -127..127). */
     public native int[] getWhiteBalanceGain();
@@ -100,16 +100,25 @@ public class CamLib {
      */
     public native boolean applyFlatField(Bitmap still, Bitmap tmpl);
 
-    public native void setExpoTime(int microseconds);       // экспозиция, мкс
+    public native int setExpoTime(int microseconds);       // экспозиция, мкс
 
-    public native void setExpoAGain(int percent);           // усиление, % (100 = 1.0x)
+    public native int setExpoAGain(int percent);           // усиление, % (100 = 1.0x)
 
-    public native void setWhiteBalanceGain(int r, int g, int b);
+    public native int setWhiteBalanceGain(int r, int g, int b);
 
     /** Гамма (тональная кривая), проценты: Toupcam 20..180 (100 = 1.0). §3.3. */
-    public native void setGamma(int gamma);
+    public native int setGamma(int gamma);
 
-    public native void setOption(int option, int value);
+    public native int setOption(int option, int value);
+
+    /**
+     * R14: фактическое состояние (readback), пары [HRESULT, значение...] — раскладку см. в
+     * jnicam.cpp (readState). Сеттеры возвращают HRESULT: 0 — принят, иначе — нет.
+     */
+    public native int[] readState();
+
+    /** R14/R17: сведения о модели и прошивке для журнала диагностики («ключ=значение» по строкам). */
+    public native String describe();
 
     public native boolean isAlive();
 

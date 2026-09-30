@@ -75,6 +75,8 @@ internal class CamLibDevice(private val context: Context) : ToupcamDevice {
     override fun getExpoAGain(): Int = cam.getExpoAGain()
     override fun awbOnce() = cam.awbOnce()
     override fun getWhiteBalanceGain(): IntArray = cam.getWhiteBalanceGain()
+    override fun readState(): IntArray = cam.readState()
+    override fun describe(): String = cam.describe()
 
     /** Запросить USB-доступ у пользователя и дождаться ответа (§5 манифеста). */
     private suspend fun requestUsbPermission(usb: UsbManager, device: UsbDevice) =

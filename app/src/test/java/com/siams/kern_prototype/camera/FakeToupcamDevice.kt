@@ -25,6 +25,11 @@ internal class FakeCameraRig {
     @Volatile var setterGate: CountDownLatch? = null
     @Volatile var pullGate: CountDownLatch? = null
     @Volatile var pullImageGate: CountDownLatch? = null         // медленная отрисовка превью
+    /** SDK не смог сообщить размер кадра превью / снимка. */
+    @Volatile var failPreviewSize = false
+    @Volatile var failStillSize = false
+    /** Сеттеры, которые SDK «отклоняет» (E_NOTIMPL), — по имени. */
+    val rejectSetters: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
     /** Кадры превью (EVENT_IMAGE) идут, как у живой камеры; false — поток кадров остановлен. */
     @Volatile var previewFrames = true
     @Volatile var frameIntervalMs = 20L
@@ -100,8 +105,8 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
         rig.log += "close$id"
     }
 
-    override fun previewSize() = handle("previewSize") { intArrayOf(8, 6) }
-    override fun stillSize() = handle("stillSize") { intArrayOf(8, 6) }
+    override fun previewSize() = handle("previewSize") { if (rig.failPreviewSize) intArrayOf(0, 0) else intArrayOf(8, 6) }
+    override fun stillSize() = handle("stillSize") { if (rig.failStillSize) intArrayOf(0, 0) else intArrayOf(8, 6) }
 
     override fun snap(): Boolean = handle("snap") {
         rig.log += "snapStart$id"
@@ -129,19 +134,42 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
 
     override fun applyFlatField(still: Bitmap, template: Bitmap) = true // без хэндла
 
-    override fun setAutoExpoEnable(mode: Int) = handle("setAutoExpoEnable") { rig.log += "ae$mode$id" }
+    private fun hr(name: String) = if (name in rig.rejectSetters) E_NOTIMPL else 0
+
+    @Volatile private var expoUs = 0
+    @Volatile private var gainPct = 0
+    @Volatile private var gammaVal = 0
+    @Volatile private var wb = intArrayOf(0, 0, 0)
+
+    override fun setAutoExpoEnable(mode: Int) = handle("setAutoExpoEnable") { rig.log += "ae$mode$id"; hr("AutoExpoEnable") }
     override fun setExpoTime(microseconds: Int) = handle("setExpoTime") {
         rig.log += "expo$id=$microseconds"
         rig.log += "setExpoStart$id"
         rig.setterGate?.await(5, TimeUnit.SECONDS)
         rig.log += "setExpo$id"
+        if (hr("ExpoTime") == 0) expoUs = microseconds
+        hr("ExpoTime")
     }
-    override fun setExpoAGain(percent: Int) = handle("setExpoAGain") {}
-    override fun setWhiteBalanceGain(r: Int, g: Int, b: Int) = handle("setWb") {}
-    override fun setGamma(gamma: Int) = handle("setGamma") {}
-    override fun setMaxAutoExpoTimeAGain(maxTimeUs: Int, maxGainPercent: Int) = handle("setMaxAe") {}
+    override fun setExpoAGain(percent: Int) = handle("setExpoAGain") { if (hr("ExpoAGain") == 0) gainPct = percent; hr("ExpoAGain") }
+    override fun setWhiteBalanceGain(r: Int, g: Int, b: Int) = handle("setWb") {
+        if (hr("WhiteBalanceGain") == 0) wb = intArrayOf(r, g, b); hr("WhiteBalanceGain")
+    }
+    override fun setGamma(gamma: Int) = handle("setGamma") { if (hr("Gamma") == 0) gammaVal = gamma; hr("Gamma") }
+    override fun setMaxAutoExpoTimeAGain(maxTimeUs: Int, maxGainPercent: Int) = handle("setMaxAe") { hr("MaxAutoExpoTimeAGain") }
     override fun getExpoTime() = handle("getExpoTime") { 1000 }
     override fun getExpoAGain() = handle("getExpoAGain") { 100 }
-    override fun awbOnce() = handle("awbOnce") {}
+    override fun awbOnce() = handle("awbOnce") { hr("AwbInit") }
     override fun getWhiteBalanceGain() = handle("getWb") { intArrayOf(0, 0, 0) }
+    override fun readState(): IntArray = handle("readState") {
+        val wbHr = if ("WhiteBalanceGain" in rig.rejectSetters) E_NOTIMPL else 0
+        intArrayOf(
+            0, expoUs, 0, expoUs, 0, gainPct, 0, gammaVal, wbHr, wb[0], wb[1], wb[2], 0, 0,
+            0, 100, 15_000_000, 8_000, 0, 100, 5000, 100, 0, 1, 0, 0,
+        )
+    }
+    override fun describe() = "sdk=fake\nmodel=FAKE$id"
+
+    private companion object {
+        const val E_NOTIMPL = 0x80004001.toInt()
+    }
 }

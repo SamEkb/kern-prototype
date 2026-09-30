@@ -506,6 +506,86 @@ class ToupcamControllerTest {
         withTimeout(3_000) { while (!cond(controllers.last().state.value)) kotlinx.coroutines.delay(10) }
     }
 
+    // ---- R14: отчёт применения ------------------------------------------------------------
+
+    @Test
+    fun rejectedSetterIsReportedButDoesNotBreakCapture() = runBlocking {
+        rig.rejectSetters += "WhiteBalanceGain"      // напр., камера в режиме Temp/Tint
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val report = c.lastApplyReport!!
+        assertEquals(setOf("WhiteBalanceGain"), report.rejected.keys)
+        assertEquals("0x80004001", report.rejected["WhiteBalanceGain"])
+        assertEquals(CameraProfile.defaultFor(LampType.DAYLIGHT).exposureTimeNs / 1000, report.exposureUs.toLong())
+        val f = target()
+        c.capture(f, LampType.DAYLIGHT)              // снимок не останавливается
+        assertTrue(f.length() > 0)
+    }
+
+    @Test
+    fun unreadablePreviewSizeFailsConnectionInsteadOfFallback() = runBlocking {
+        rig.failPreviewSize = true
+        val c = controller()
+        try { c.open(LampType.DAYLIGHT); fail("запасной размер превью недопустим") } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("размер кадра превью"))
+        }
+        assertTrue(c.state.value is CameraControllerState.Error)
+        assertTrue("подключение закрыто", rig.waitFor("close1"))
+    }
+
+    @Test
+    fun unreadableStillSizeRefusesCaptureBeforeSnap() = runBlocking {
+        rig.failStillSize = true
+        val c = controller()
+        c.open(LampType.DAYLIGHT)                     // превью работает
+        assertTrue(c.state.value is CameraControllerState.Ready)
+        try { c.capture(target(), LampType.DAYLIGHT); fail() } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("Снимок недоступен"))
+        }
+        assertFalse("Snap не выполнялся", rig.has("snap1"))
+    }
+
+    @Test
+    fun rejectedAutoExposureCallsAreRecorded() = runBlocking {
+        rig.rejectSetters += "MaxAutoExpoTimeAGain"
+        rig.rejectSetters += "AutoExpoEnable"
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val result = c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) // поведение прежнее
+        assertEquals(LampType.DAYLIGHT, result.lampType)
+        val calls = c.lastAutoCalls
+        assertEquals(listOf("MaxAutoExpoTimeAGain", "AutoExpoEnable", "AutoExpoEnable"), calls.map { it.op })
+        assertEquals(listOf("1000000 us, 400 %", "1", "0"), calls.map { it.args })
+        assertTrue("все отказы видны", calls.all { !it.ok && it.hr == "0x80004001" })
+    }
+
+    @Test
+    fun rejectedAwbStartIsRecorded() = runBlocking {
+        rig.rejectSetters += "AwbInit"
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        val awb = c.lastAutoCalls.single()
+        assertEquals("AwbInit", awb.op)
+        assertFalse(awb.ok)
+        assertEquals("0x80004001", awb.hr)
+    }
+
+    @Test
+    fun acceptedAutoCallsAreRecordedAsOk() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        assertTrue(c.lastAutoCalls.isNotEmpty() && c.lastAutoCalls.all { it.ok })
+    }
+
+    @Test
+    fun acceptedSettersProduceEmptyRejectedList() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        assertTrue(c.lastApplyReport!!.rejected.isEmpty())
+    }
+
     // ---- п.3–5 предыдущего ревью ---------------------------------------------------------
 
     /**

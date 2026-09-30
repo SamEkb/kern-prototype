@@ -112,7 +112,8 @@ class ToupcamController internal constructor(
     @Volatile private var connection: CameraConnection? = null
 
     private var previewSize = Size(1920, 1080)
-    private var stillSize = Size(1920, 1080)
+    /** Размер снимка; null — не определён (снимок не поддерживается или размер не прочитан). */
+    private var stillSize: Size? = null
     // Буфер превью используется только очередью подключения; освобождается её закрытием.
     @Volatile private var previewBitmap: Bitmap? = null
     // Буфер снимка переиспользуется в пределах подключения. При переподключении не
@@ -166,8 +167,13 @@ class ToupcamController internal constructor(
         try {
             check(!released) { "Камера освобождена" } // release() до записи поля — см. выше
             conn.connect()                             // USB-доступ → открыть → поток кадров
-            conn.run { dev -> readSizes(dev) }
+            conn.run { dev ->
+                readSizes(dev)
+                // R14/R17: модель, прошивка, выбранное still-разрешение — в журнал диагностики.
+                runCatching { Log.i(TAG, "Камера:\n" + dev.describe().trim()) }
+            }
             applyToConnection(conn, profile)
+            readback(conn)?.let { Log.i(TAG, "Фактические параметры после подключения: $it") }
             previewBitmap = Bitmap.createBitmap(previewSize.width, previewSize.height, Bitmap.Config.ARGB_8888)
             // release() пришёл, пока шло подключение, — подключение уже закрывается.
             check(!released && connection === conn && !conn.isClosed) { "Камера освобождена" }
@@ -243,6 +249,40 @@ class ToupcamController internal constructor(
 
     override suspend fun switchLamp(lampType: LampType) = opLock.withLock { applyLocked(profileStore.read(lampType)) }
 
+    /** R14: последний отчёт применения профиля (запрошенные значения SDK и отклонённые сеттеры). */
+    @Volatile
+    internal var lastApplyReport: ToupcamProfileApplier.ApplyReport? = null
+        private set
+
+    /** Применить профиль и зафиксировать, какие сеттеры SDK его не приняли (R14). */
+    private fun applyAndReport(dev: ToupcamDevice, profile: CameraProfile) {
+        val report = ToupcamProfileApplier.apply(dev, profile)
+        lastApplyReport = report
+        if (report.rejected.isNotEmpty()) Log.w(TAG, "SDK отклонил параметры профиля ${profile.lampType}: ${report.rejected}")
+    }
+
+    /** R14: вызов SDK в авто-процедуре — операция, аргументы, HRESULT. */
+    @kotlinx.serialization.Serializable
+    data class SdkCall(val op: String, val args: String, val hr: String) {
+        val ok: Boolean get() = !hr.startsWith("0x8")
+    }
+
+    /** R14: вызовы SDK последней авто-процедуры (AE/AWB) — для журнала диагностики и аудита. */
+    @Volatile
+    internal var lastAutoCalls: List<SdkCall> = emptyList()
+        private set
+
+    /** Записать вызов SDK авто-процедуры; поведение не меняется (отказ только фиксируется). */
+    private fun sdk(calls: MutableList<SdkCall>, op: String, args: String, hr: Int) {
+        val call = SdkCall(op, args, "0x%08x".format(hr))
+        calls += call
+        if (hr < 0) Log.w(TAG, "SDK отклонил $op($args): ${call.hr}") else Log.i(TAG, "SDK $op($args) → ${call.hr}")
+    }
+
+    /** R14: фактическое состояние параметров по данным SDK (в очереди подключения). */
+    private suspend fun readback(conn: CameraConnection): CameraReadback? =
+        runCatching { conn.run { CameraReadback.parse(it.readState()) } }.getOrNull()
+
     /** Применить профиль (под [opLock]). */
     private suspend fun applyLocked(profile: CameraProfile) {
         currentProfile = profile
@@ -261,7 +301,7 @@ class ToupcamController internal constructor(
     private suspend fun applyToConnection(
         conn: CameraConnection,
         profile: CameraProfile,
-        block: (ToupcamDevice) -> CameraProfile = { dev -> ToupcamProfileApplier.apply(dev, profile); profile },
+        block: (ToupcamDevice) -> CameraProfile = { dev -> applyAndReport(dev, profile); profile },
     ): CameraProfile {
         applied = null
         return conn.run { dev ->
@@ -315,27 +355,30 @@ class ToupcamController internal constructor(
     override suspend fun autoExposure(current: CameraProfile): CameraProfile = opLock.withLock {
         val conn = connection ?: return@withLock current
         var done = false
+        val calls = java.util.Collections.synchronizedList(mutableListOf<SdkCall>())
         try {
             // Вызовы SDK и их порядок — прежние; каждый шаг — в очереди подключения.
             applied = null                     // авто-режим: параметры камеры меняются сами
             conn.run { cam ->
-                cam.setMaxAutoExpoTimeAGain(AE_MAX_TIME_US, AE_MAX_GAIN_PERCENT)
-                cam.setAutoExpoEnable(1)       // включить авто-AE
+                sdk(calls, "MaxAutoExpoTimeAGain", "$AE_MAX_TIME_US us, $AE_MAX_GAIN_PERCENT %",
+                    cam.setMaxAutoExpoTimeAGain(AE_MAX_TIME_US, AE_MAX_GAIN_PERCENT))
+                sdk(calls, "AutoExpoEnable", "1", cam.setAutoExpoEnable(1)) // включить авто-AE
             }
             delay(AE_CONVERGE_MS)              // дать сойтись (~кадры на нашем fps)
             val updated = applyToConnection(conn, current) { cam ->
                 val us = cam.getExpoTime()
                 val gainPct = cam.getExpoAGain()
-                cam.setAutoExpoEnable(0)       // заморозить — дальше только ручное
+                sdk(calls, "AutoExpoEnable", "0", cam.setAutoExpoEnable(0)) // заморозить — дальше только ручное
                 current.copy(
                     exposureTimeNs = us.toLong() * 1_000L,
                     iso = gainPct,
-                ).also { ToupcamProfileApplier.apply(cam, it) }
+                ).also { applyAndReport(cam, it) }
             }
             done = true
             currentProfile = updated
             updated
         } finally {
+            lastAutoCalls = calls.toList()
             // R13: отмена/ошибка посреди AE не оставляет камеру в авто-режиме — возвращаем ручной
             // режим с прежним профилем (applier выключает авто-AE).
             if (!done) restoreManual(conn, current)
@@ -350,9 +393,10 @@ class ToupcamController internal constructor(
     override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile = opLock.withLock {
         val conn = connection ?: return@withLock current
         var done = false
+        val calls = java.util.Collections.synchronizedList(mutableListOf<SdkCall>())
         try {
             applied = null                     // one-push AWB меняет баланс белого сам
-            conn.run { it.awbOnce() }
+            conn.run { sdk(calls, "AwbInit", "one-push", it.awbOnce()) }
             delay(AWB_SETTLE_MS)
             val updated = applyToConnection(conn, current) { cam ->
                 val g = cam.getWhiteBalanceGain()  // [R, G, B], знаковые (-127..127)
@@ -363,12 +407,13 @@ class ToupcamController internal constructor(
                     wbGreenEvenGain = 1f,
                     wbGreenOddGain = 1f,
                     wbBlueGain = blue,
-                ).also { ToupcamProfileApplier.apply(cam, it) }
+                ).also { applyAndReport(cam, it) }
             }
             done = true
             currentProfile = updated
             updated
         } finally {
+            lastAutoCalls = calls.toList()
             if (!done) restoreManual(conn, current)
         }
     }
@@ -625,22 +670,27 @@ class ToupcamController internal constructor(
 
     // ---- Размеры и буферы ---------------------------------------------------------
 
+    /**
+     * R17: размеры кадров текущего подключения. Размер превью обязателен — не прочитан → ошибка
+     * подключения (запасные/прежние значения не используются). Размер снимка не прочитан →
+     * снимок недоступен ([ensureStillBitmap] откажет до Snap).
+     */
     private fun readSizes(dev: ToupcamDevice) {
-        dev.previewSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }?.let {
-            previewSize = Size(it[0], it[1])
-        }
-        dev.stillSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }?.let {
-            stillSize = Size(it[0], it[1])
-        }
+        val p = dev.previewSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }
+            ?: throw IllegalStateException("Не удалось определить размер кадра превью камеры")
+        previewSize = Size(p[0], p[1])
+        stillSize = dev.stillSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }?.let { Size(it[0], it[1]) }
+        if (stillSize == null) Log.e(TAG, "Размер снимка не определён — снимок недоступен")
         Log.i(TAG, "Touptek: preview=$previewSize still=$stillSize")
     }
 
     private fun ensureStillBitmap(): Bitmap {
+        val size = stillSize ?: throw IllegalStateException("Снимок недоступен: размер кадра снимка камеры не определён")
         val existing = stillBitmap
-        if (existing != null && existing.width == stillSize.width && existing.height == stillSize.height) {
+        if (existing != null && existing.width == size.width && existing.height == size.height) {
             return existing
         }
-        return Bitmap.createBitmap(stillSize.width, stillSize.height, Bitmap.Config.ARGB_8888)
+        return Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
             .also { stillBitmap = it }
     }
 
