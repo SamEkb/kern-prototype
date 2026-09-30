@@ -19,7 +19,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -45,12 +44,11 @@ fun DrillingFormScreen(
 ) {
     val initial by vm.initial.collectAsStateWithLifecycle()
     val schema by vm.schema.collectAsStateWithLifecycle()
+    val errors by vm.errors.collectAsStateWithLifecycle()
     val simplified = schema.isEmpty()
 
     var title by remember(initial.loaded) { mutableStateOf(initial.title) }
-    val values = remember(initial.loaded) {
-        mutableStateMapOf<String, String>().apply { putAll(initial.values) }
-    }
+    val values by vm.values.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -89,12 +87,15 @@ fun DrillingFormScreen(
 
             schema.forEach { field ->
                 val isNumber = field.type != PassportFieldType.STRING
+                val error = errors[field.key]
                 OutlinedTextField(
                     value = values[field.key].orEmpty(),
-                    onValueChange = { input ->
-                        values[field.key] = if (isNumber) input.filter { it.isDigit() || it == '.' || it == ',' || it == '-' } else input
-                    },
+                    // R15: текст не фильтруется — неверный ввод остаётся видимым и получает ошибку.
+                    onValueChange = { input -> vm.onFieldChange(field.key, input) },
                     label = { Text(field.ruLabel) },
+                    // R15: неверное значение не пропадает молча — ошибка у поля.
+                    isError = error != null,
+                    supportingText = error?.let { { Text(it) } },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = if (isNumber) KeyboardType.Number else KeyboardType.Text,
@@ -104,7 +105,7 @@ fun DrillingFormScreen(
             }
 
             Button(
-                onClick = { vm.save(title, values.toMap()) { id -> if (!vm.isEditing) onSavedNew(id) else onBack() } },
+                onClick = { vm.save(title) { id -> if (!vm.isEditing) onSavedNew(id) else onBack() } },
                 enabled = title.isNotBlank(),
                 modifier = Modifier.fillMaxWidth().padding(top = KernTokens.spaceMd),
             ) {

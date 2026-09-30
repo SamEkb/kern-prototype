@@ -110,6 +110,10 @@ class KernRepository @Inject constructor(
     fun passportStrings(passportJson: String): Map<String, String> =
         passportCodec.decodeToStrings(passportJson)
 
+    /** R15: ошибки ввода паспорта по ключам полей (пусто — можно сохранять). */
+    fun passportErrors(passport: Map<String, String>): Map<String, String> =
+        passportCodec.validate(passport)
+
     // ---- Столы -------------------------------------------------------------
 
     fun observeTables(drillingId: String): Flow<List<TableWithLayers>> =

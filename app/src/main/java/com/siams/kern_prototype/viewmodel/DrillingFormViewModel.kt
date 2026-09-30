@@ -20,7 +20,6 @@ import javax.inject.Inject
 
 data class DrillingFormInitial(
     val title: String = "",
-    val values: Map<String, String> = emptyMap(),
     val loaded: Boolean = false,
 )
 
@@ -46,14 +45,26 @@ class DrillingFormViewModel @Inject constructor(
     private val _initial = MutableStateFlow(DrillingFormInitial())
     val initial: StateFlow<DrillingFormInitial> = _initial.asStateFlow()
 
+    /**
+     * R15: текст полей паспорта ровно как введён (без фильтрации символов) — проверяется и
+     * сохраняется именно он: «12а» не превращается в 12, а остаётся видимой ошибкой.
+     */
+    private val _values = MutableStateFlow<Map<String, String>>(emptyMap())
+    val values: StateFlow<Map<String, String>> = _values.asStateFlow()
+
+    fun onFieldChange(key: String, input: String) {
+        _values.value = _values.value + (key to input)
+        clearError(key)
+    }
+
     init {
         if (drillingId != null) {
             viewModelScope.launch {
                 val d = repository.getDrilling(drillingId)
                 if (d != null) {
+                    _values.value = repository.passportStrings(d.passportJson)
                     _initial.value = DrillingFormInitial(
                         title = d.title,
-                        values = repository.passportStrings(d.passportJson),
                         loaded = true,
                     )
                 } else {
@@ -65,8 +76,24 @@ class DrillingFormViewModel @Inject constructor(
         }
     }
 
-    /** Сохранить; в колбэк приходит id долбления (для перехода в съёмку при создании). */
-    fun save(title: String, values: Map<String, String>, onDone: (String) -> Unit) {
+    /** R15: ошибки полей паспорта по ключам (показываются под полями; сохранение не выполняется). */
+    private val _errors = MutableStateFlow<Map<String, String>>(emptyMap())
+    val errors: StateFlow<Map<String, String>> = _errors.asStateFlow()
+
+    /** Поле изменено — его прежняя ошибка больше не относится к вводу. */
+    fun clearError(key: String) {
+        if (key in _errors.value) _errors.value = _errors.value - key
+    }
+
+    /**
+     * Сохранить; в колбэк приходит id долбления (для перехода в съёмку при создании).
+     * R15: при неверных полях ничего не сохраняется — ошибки показываются у полей.
+     */
+    fun save(title: String, onDone: (String) -> Unit) {
+        val values = _values.value
+        val errors = repository.passportErrors(values)
+        _errors.value = errors
+        if (errors.isNotEmpty()) return
         viewModelScope.launch {
             if (drillingId != null) {
                 repository.updateDrilling(drillingId, title, values)
