@@ -287,6 +287,90 @@ class SaveCaptureTest {
         }
     }
 
+    /** R15: глубина, введённая после DAYLIGHT, достаётся и доснятому позже УФ. */
+    @Test
+    fun layerShotLaterInheritsTableDepths() = runBlocking {
+        val d = repo.createDrilling("Д", emptyMap())
+        val (id1, f1) = shot(d)
+        val table = repo.saveCapture(d, null, id1, LampType.DAYLIGHT, f1, profile)
+        repo.setLayerDepth(table.id, 1520.5, 1530.0)
+        val (id2, f2) = shot(d)
+        repo.saveCapture(d, table.id, id2, LampType.UF, f2, profile)
+        val uf = db.layerDao().getByTableAndLamp(table.id, "UF")!!
+        assertEquals(1520.5, uf.kernUpperDepth!!, 0.0)
+        assertEquals(1530.0, uf.kernLowerDepth!!, 0.0)
+    }
+
+    /** R15: слой старых данных без глубин при пересъёмке получает глубины стола. */
+    @Test
+    fun reshotLegacyLayerTakesTableDepths() = runBlocking {
+        val d = repo.createDrilling("Д", emptyMap())
+        val (id1, f1) = shot(d)
+        val table = repo.saveCapture(d, null, id1, LampType.DAYLIGHT, f1, profile)
+        val (id2, f2) = shot(d)
+        repo.saveCapture(d, table.id, id2, LampType.UF, f2, profile)
+        // Данные до исправления: глубина только у дневного слоя.
+        val day = db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT")!!
+        db.layerDao().update(day.copy(kernUpperDepth = 10.0, kernLowerDepth = 12.0))
+        val (id3, f3) = shot(d)
+        repo.saveCapture(d, table.id, id3, LampType.UF, f3, profile)
+        val uf = db.layerDao().getByTableAndLamp(table.id, "UF")!!
+        assertEquals(10.0 to 12.0, uf.kernUpperDepth to uf.kernLowerDepth)
+    }
+
+    /**
+     * R15: старые данные, где пара глубин, собранная по границам из разных слоёв, — обратный интервал
+     * (DAYLIGHT: кровля 200; UF: 100…150 → 200…150). Пересъёмка отказывает до записи: прежний слой,
+     * его файлы и глубины не меняются, новый файл не остаётся.
+     */
+    @Test
+    fun reshootWithContradictoryLegacyDepthsIsRefusedWithoutChanges() = runBlocking {
+        val d = repo.createDrilling("Д", emptyMap())
+        val (id1, f1) = shot(d)
+        val table = repo.saveCapture(d, null, id1, LampType.DAYLIGHT, f1, profile)
+        val (id2, f2) = shot(d)
+        repo.saveCapture(d, table.id, id2, LampType.UF, f2, profile)
+        val day = db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT")!!
+        val uf = db.layerDao().getByTableAndLamp(table.id, "UF")!!
+        db.layerDao().update(day.copy(kernUpperDepth = 200.0, kernLowerDepth = null))
+        db.layerDao().update(uf.copy(kernUpperDepth = 100.0, kernLowerDepth = 150.0))
+        val before = db.layerDao().listByTable(table.id).sortedBy { it.id }
+
+        try {
+            repo.checkCanSaveCapture(table.id, LampType.UF); fail("предварительная проверка должна отказать")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!, e.message!!.contains("кровля 200, подошва 150"))
+        }
+        val (id3, f3) = shot(d)
+        try {
+            repo.saveCapture(d, table.id, id3, LampType.UF, f3, profile); fail("пересъёмка должна отказать")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!, e.message!!.contains("Исправьте глубины"))
+        }
+        assertEquals("слои не изменились", before, db.layerDao().listByTable(table.id).sortedBy { it.id })
+        assertTrue("прежний файл УФ на месте", File(uf.filePath).exists())
+        assertFalse("новый файл не остался", f3.exists())
+        assertFalse(FileStorage(context).thumbFileFor(f3).exists())
+
+        // После исправления глубин оператором пересъёмка проходит.
+        repo.setLayerDepth(table.id, 100.0, 150.0)
+        val (id4, f4) = shot(d)
+        repo.saveCapture(d, table.id, id4, LampType.UF, f4, profile)
+        assertEquals(100.0 to 150.0, db.layerDao().getByTableAndLamp(table.id, "UF")!!.let { it.kernUpperDepth to it.kernLowerDepth })
+    }
+
+    /** R15: неверные глубины репозиторий не записывает (защита помимо формы). */
+    @Test
+    fun invalidDepthsAreRejectedWithoutChanges() = runBlocking {
+        val d = repo.createDrilling("Д", emptyMap())
+        val (id1, f1) = shot(d)
+        val table = repo.saveCapture(d, null, id1, LampType.DAYLIGHT, f1, profile)
+        repo.setLayerDepth(table.id, 5.0, 6.0)
+        try { repo.setLayerDepth(table.id, 7.0, 6.0); fail() } catch (_: IllegalArgumentException) {}
+        val layer = db.layerDao().getByTableAndLamp(table.id, "DAYLIGHT")!!
+        assertEquals(5.0 to 6.0, layer.kernUpperDepth to layer.kernLowerDepth)
+    }
+
     @Test
     fun atomicWriteLeavesNoPartialFile() {
         val target = File(context.filesDir, "atomic/x.jpg")

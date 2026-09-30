@@ -48,12 +48,14 @@ import com.siams.kern_prototype.domain.model.LampType
 import com.siams.kern_prototype.ui.theme.Body3
 import com.siams.kern_prototype.ui.theme.Body3Bold
 import com.siams.kern_prototype.ui.theme.Gray40
+import com.siams.kern_prototype.ui.theme.Orange30
 import com.siams.kern_prototype.ui.theme.Ink
 import com.siams.kern_prototype.ui.theme.KernTheme
 import com.siams.kern_prototype.ui.theme.KernTokens
 import com.siams.kern_prototype.ui.theme.Red30
 import com.siams.kern_prototype.ui.theme.UvYellow
 import com.siams.kern_prototype.viewmodel.TableViewViewModel
+import com.siams.kern_prototype.data.DepthInput
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -163,9 +165,12 @@ fun TableViewScreen(
                 onDelete = uf?.let { { pendingDeleteLayer = it.id } },
             )
 
+            val depth by vm.depth.collectAsStateWithLifecycle()
+            val depthMismatch by vm.depthMismatch.collectAsStateWithLifecycle()
             DepthEditor(
-                initialUpper = daylight?.kernUpperDepth ?: uf?.kernUpperDepth,
-                initialLower = daylight?.kernLowerDepth ?: uf?.kernLowerDepth,
+                depth = depth,
+                mismatch = depthMismatch,
+                onChange = vm::onDepthChange,
                 onSave = vm::saveDepth,
             )
         }
@@ -271,32 +276,41 @@ private fun LayerRow(
 
 @Composable
 private fun DepthEditor(
-    initialUpper: Double?,
-    initialLower: Double?,
-    onSave: (Double?, Double?) -> Unit,
+    depth: TableViewViewModel.DepthState,
+    mismatch: Boolean,
+    onChange: (DepthInput.Field, String) -> Unit,
+    onSave: () -> Unit,
 ) {
-    var upper by remember(initialUpper) { mutableStateOf(initialUpper?.toString() ?: "") }
-    var lower by remember(initialLower) { mutableStateOf(initialLower?.toString() ?: "") }
+    // R15: текст полей — как введён (во ViewModel); неверный ввод не превращается в «пусто».
+    val upperError = depth.errors[DepthInput.Field.UPPER]
+    val lowerError = depth.errors[DepthInput.Field.LOWER]
     Text(stringResource(R.string.table_view_depth_hint), style = Body3, color = Gray40)
+    if (mismatch) {
+        Text(stringResource(R.string.table_view_depth_mismatch), style = Body3, color = Orange30)
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
     ) {
         OutlinedTextField(
-            value = upper, onValueChange = { upper = it }, label = { Text(stringResource(R.string.table_view_depth_upper)) },
+            value = depth.upper, onValueChange = { onChange(DepthInput.Field.UPPER, it) },
+            label = { Text(stringResource(R.string.table_view_depth_upper)) },
+            isError = upperError != null,
+            supportingText = upperError?.let { { Text(it) } },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
             modifier = Modifier.weight(1f),
         )
         OutlinedTextField(
-            value = lower, onValueChange = { lower = it }, label = { Text(stringResource(R.string.table_view_depth_lower)) },
+            value = depth.lower, onValueChange = { onChange(DepthInput.Field.LOWER, it) },
+            label = { Text(stringResource(R.string.table_view_depth_lower)) },
+            isError = lowerError != null,
+            supportingText = lowerError?.let { { Text(it) } },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
             modifier = Modifier.weight(1f),
         )
-        OutlinedButton(onClick = {
-            onSave(upper.replace(',', '.').toDoubleOrNull(), lower.replace(',', '.').toDoubleOrNull())
-        }) { Text(stringResource(R.string.common_ok)) }
+        OutlinedButton(onClick = onSave, enabled = depth.loaded) { Text(stringResource(R.string.common_ok)) }
     }
 }

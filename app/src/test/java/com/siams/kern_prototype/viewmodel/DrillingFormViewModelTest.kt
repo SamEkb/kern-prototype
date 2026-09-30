@@ -46,6 +46,7 @@ class DrillingFormViewModelTest {
     private lateinit var db: KernDatabase
     private lateinit var repo: KernRepository
     private lateinit var vm: DrillingFormViewModel
+    private val vms = java.util.Collections.synchronizedList(mutableListOf<androidx.lifecycle.ViewModel>())
 
     private fun <T> onMain(block: () -> T): T = main.submit<T> { block() }.get(5, TimeUnit.SECONDS)
 
@@ -54,13 +55,12 @@ class DrillingFormViewModelTest {
         Dispatchers.setMain(main.asCoroutineDispatcher())
         db = Room.inMemoryDatabaseBuilder(context, KernDatabase::class.java).allowMainThreadQueries().build()
         repo = KernRepository(db, db.drillingDao(), db.tableDao(), db.layerDao(), FileStorage(context), PassportCodec(json), json)
-        vm = onMain { DrillingFormViewModel(repo, ServerSettingsStore(context), SavedStateHandle()) }
+        vm = onMain { DrillingFormViewModel(repo, ServerSettingsStore(context), SavedStateHandle()).also { vms += it } }
     }
 
     @After
     fun tearDown() {
-        onMain { vm.viewModelScope.cancel() }
-        onMain { }
+        stopViewModels(vms, main)
         Dispatchers.resetMain()
         main.shutdown()
         db.close()
@@ -114,7 +114,7 @@ class DrillingFormViewModelTest {
             db.drillingDao().updatePassport(id, null, """{"core_recovery":1.0E-4,"depth_correction":1.0E20,"well_number":"0012"}""")
         }
         lateinit var edit: DrillingFormViewModel
-        onMain { edit = DrillingFormViewModel(repo, ServerSettingsStore(context), SavedStateHandle(mapOf(com.siams.kern_prototype.ui.nav.Routes.ARG_DRILLING_ID to id))) }
+        onMain { edit = DrillingFormViewModel(repo, ServerSettingsStore(context), SavedStateHandle(mapOf(com.siams.kern_prototype.ui.nav.Routes.ARG_DRILLING_ID to id))).also { vms += it } }
         val end = System.currentTimeMillis() + 5_000
         while (!edit.initial.value.loaded && System.currentTimeMillis() < end) Thread.sleep(5)
         assertEquals("0.0001", edit.values.value["core_recovery"])
@@ -125,6 +125,5 @@ class DrillingFormViewModelTest {
         val stored = repo.passportStrings(runBlocking { repo.getDrilling(id) }!!.passportJson)
         assertEquals("0.0001", stored["core_recovery"])
         assertEquals("100000000000000000000", stored["depth_correction"])
-        onMain { edit.viewModelScope.cancel() }
     }
 }

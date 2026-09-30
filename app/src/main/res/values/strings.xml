@@ -50,6 +50,7 @@
     <string name="table_view_addshoot">Доснять</string>
     <string name="table_view_delete_layer_cd">Удалить слой</string>
     <string name="table_view_depth_hint">Глубина керна по столу (§8.5), м:</string>
+    <string name="table_view_depth_mismatch">Глубины снимков этого стола различаются. Проверьте значения и нажмите «OK», чтобы записать общие глубины для обоих снимков.</string>
     <string name="table_view_depth_upper">Кровля</string>
     <string name="table_view_depth_lower">Подошва</string>
 

@@ -236,6 +236,10 @@ class KernRepository @Inject constructor(
                 // R05: пока долбление отправляется, заменить уже снятый кадр нельзя — ответ
                 // идущей загрузки относится к прежнему файлу. Проверка здесь, в транзакции.
                 if (existing != null) ensureNotSending(t.drillingId)
+                // R15: глубины — общие для стола: новый/переснятый слой получает глубины стола
+                // (досъёмка УФ после ввода глубины не даёт null). Собранная по границам пара
+                // проверяется до записи: у старых данных она может оказаться обратным интервалом.
+                val (upper, lower) = consistentTableDepths(t.id)
                 layerDao.upsert(
                     LayerEntity(
                         id = existing?.id ?: layerId,
@@ -246,8 +250,8 @@ class KernRepository @Inject constructor(
                         cameraProfileJson = profileJson,
                         capturedAt = System.currentTimeMillis(),
                         coreImageType = coreImageType,
-                        kernUpperDepth = existing?.kernUpperDepth,
-                        kernLowerDepth = existing?.kernLowerDepth,
+                        kernUpperDepth = upper,
+                        kernLowerDepth = lower,
                         remoteImageId = null, // перезаливать заново
                         staleRemoteImageId = existing?.staleRemoteImageId, // прежний кадр всё ещё на сервере
                         fileSha256 = sha256,
@@ -313,6 +317,24 @@ class KernRepository @Inject constructor(
         tableId ?: return
         val table = tableDao.getById(tableId) ?: return
         if (layerDao.getByTableAndLamp(tableId, lampType.name) != null) ensureNotSending(table.drillingId)
+        consistentTableDepths(tableId) // R15: противоречивые глубины — отказ до снимка
+    }
+
+    /**
+     * R15: глубины стола для нового/переснятого слоя ([DepthInput.tableDepths]) — только если
+     * собранная пара допустима. Иначе отказ: слой не записывается, прежний слой и файлы не меняются;
+     * оператор исправляет глубины стола в редакторе.
+     */
+    private suspend fun consistentTableDepths(tableId: String): Pair<Double?, Double?> {
+        val (upper, lower) = DepthInput.tableDepths(layerDao.listByTable(tableId))
+        DepthInput.problem(upper, lower)?.let {
+            val fmt = { v: Double? -> v?.let(PassportCodec::formatDecimal) ?: "—" }
+            throw IllegalStateException(
+                "Глубины стола противоречат друг другу (кровля ${fmt(upper)}, подошва ${fmt(lower)}): $it. " +
+                    "Исправьте глубины в просмотре стола и повторите съёмку.",
+            )
+        }
+        return upper to lower
     }
 
     /** Кадр не дошёл до фиксации: убрать его JPEG и миниатюру, если БД на них не ссылается. */
@@ -385,6 +407,7 @@ class KernRepository @Inject constructor(
      * Метаданные нужно снова доставить PUT'ом (R01).
      */
     suspend fun setLayerDepth(tableId: String, upper: Double?, lower: Double?) = db.withTransaction {
+        DepthInput.problem(upper, lower)?.let { throw IllegalArgumentException("Глубины стола: $it") } // R15
         layerDao.setDepthByTable(tableId, upper, lower)
         markDrillingDirtyByTable(tableId)
         onTransactionBodyEndForTest?.invoke()

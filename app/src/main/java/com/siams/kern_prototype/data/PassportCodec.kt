@@ -73,21 +73,28 @@ class PassportCodec @Inject constructor(private val json: Json) {
 
     private fun display(p: JsonPrimitive): String {
         if (p.isString) return p.content
-        return runCatching { java.math.BigDecimal(p.content).stripTrailingZeros().toPlainString() }
-            .getOrDefault(p.content) // не число (true/false/null) — как записано
+        return runCatching { plain(p.content) }.getOrDefault(p.content) // не число (true/false/null) — как записано
     }
 
     private fun parseInt(raw: String): Int? = raw.takeIf { INT.matches(it) }?.toIntOrNull()
 
-    private fun parseDouble(raw: String): Double? =
-        raw.takeIf { DOUBLE.matches(it) }?.replace(',', '.')?.toDoubleOrNull()?.takeIf { it.isFinite() }
+    private fun parseDouble(raw: String): Double? = parseDecimal(raw)
 
     fun toJsonObject(passportJson: String): JsonObject =
         runCatching { json.decodeFromString(JsonObject.serializer(), passportJson) }
             .getOrDefault(JsonObject(emptyMap()))
 
-    private companion object {
-        val INT = Regex("-?\\d+")
-        val DOUBLE = Regex("-?\\d+([.,]\\d+)?")
+    companion object {
+        private val INT = Regex("-?\\d+")
+        private val DOUBLE = Regex("-?\\d+([.,]\\d+)?")
+
+        /** Десятичное число ввода: `-?цифры[.,цифры]`, конечное; иначе null. */
+        fun parseDecimal(raw: String): Double? =
+            raw.takeIf { DOUBLE.matches(it) }?.replace(',', '.')?.toDoubleOrNull()?.takeIf { it.isFinite() }
+
+        /** Десятичная запись без экспоненты (её принимает [parseDecimal]). */
+        fun formatDecimal(v: Double): String = plain(v.toString())
+
+        private fun plain(number: String): String = java.math.BigDecimal(number).stripTrailingZeros().toPlainString()
     }
 }

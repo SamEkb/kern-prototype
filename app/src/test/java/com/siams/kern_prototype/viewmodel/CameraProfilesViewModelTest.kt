@@ -85,8 +85,7 @@ class CameraProfilesViewModelTest {
 
     @After
     fun tearDown() {
-        onMain { vms.forEach { it.viewModelScope.cancel() } }
-        onMain { }                                     // главный поток опустел
+        stopViewModels(vms, main)
         Dispatchers.resetMain()
         main.shutdown()
     }
