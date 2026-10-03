@@ -1,7 +1,5 @@
 package com.siams.kern_prototype.ui.screens
 
-import android.graphics.SurfaceTexture
-import android.view.TextureView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -44,12 +42,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.siams.kern_prototype.camera.CameraControllerState
 import com.siams.kern_prototype.camera.CameraLimits
 import com.siams.kern_prototype.domain.model.CameraProfile
+import com.siams.kern_prototype.ui.components.CameraPreview
 import com.siams.kern_prototype.ui.components.LampSwitch
 import com.siams.kern_prototype.ui.theme.Blue
 import com.siams.kern_prototype.ui.theme.Body2Bold
@@ -151,23 +149,11 @@ fun CameraProfilesScreen(
     }
 
     Box(Modifier.fillMaxSize().background(Ink)) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                TextureView(ctx).apply {
-                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) =
-                            vm.onSurfaceAvailable(s)
-
-                        override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {}
-                        // R16: текстуру освобождает VM — после того, как камера перестала на неё рисовать.
-                        override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean =
-                            vm.onSurfaceDestroyed(s)
-
-                        override fun onSurfaceTextureUpdated(s: SurfaceTexture) {}
-                    }
-                }
-            },
+        // FIXES §1: кадр вписан с сохранением пропорций (без растяжения на весь экран).
+        CameraPreview(
+            previewSize = (cameraState as? CameraControllerState.Ready)?.previewSize,
+            onSurfaceAvailable = vm::onSurfaceAvailable,
+            onSurfaceDestroyed = vm::onSurfaceDestroyed,
         )
         (cameraState as? CameraControllerState.Opening)?.let {
             Text(

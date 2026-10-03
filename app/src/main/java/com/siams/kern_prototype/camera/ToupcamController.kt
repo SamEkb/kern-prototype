@@ -749,7 +749,9 @@ class ToupcamController internal constructor(
         try {
             val canvas = surface.lockCanvas(null) ?: return
             try {
-                canvas.drawBitmap(bmp, null, Rect(0, 0, canvas.width, canvas.height), null)
+                // FIXES §1: защита — при любой форме поверхности кадр не искажается (fit-center на чёрном).
+                canvas.drawColor(android.graphics.Color.BLACK)
+                canvas.drawBitmap(bmp, null, fitCenter(bmp.width, bmp.height, canvas.width, canvas.height), null)
             } finally {
                 surface.unlockCanvasAndPost(canvas)
             }
@@ -776,6 +778,15 @@ class ToupcamController internal constructor(
         stillSize = dev.stillSize()?.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }?.let { Size(it[0], it[1]) }
         if (stillSize == null) Log.e(TAG, "Размер снимка не определён — снимок недоступен")
         Log.i(TAG, "Touptek: preview=$previewSize still=$stillSize")
+        // FIXES §1 п.3 (диагностика): разные пропорции превью и снимка — кадрирование превью не
+        // совпадёт со снимком. Выбор разрешения превью (jnicam.cpp) меняется после проверки на камере.
+        stillSize?.let { st ->
+            val pr = previewSize.width.toDouble() / previewSize.height
+            val sr = st.width.toDouble() / st.height
+            if (kotlin.math.abs(pr - sr) / sr > 0.01) {
+                Log.w(TAG, "Пропорции превью ${"%.3f".format(pr)} и снимка ${"%.3f".format(sr)} различаются — кадрирование превью не совпадёт со снимком")
+            }
+        }
     }
 
     private fun ensureStillBitmap(): Bitmap {
@@ -842,5 +853,22 @@ class ToupcamController internal constructor(
         private const val FFC_TEMPLATE_WIDTH = 512
         private const val FFC_BLUR_RADIUS = 6
         private const val FFC_BLUR_PASSES = 3
+    }
+}
+
+/**
+ * FIXES §1: прямоугольник для [srcW]×[srcH], вписанный в [dstW]×[dstH] с сохранением пропорций и
+ * по центру (fit-center). Пустой источник или приёмник — весь приёмник.
+ */
+internal fun fitCenter(srcW: Int, srcH: Int, dstW: Int, dstH: Int): Rect {
+    if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return Rect(0, 0, maxOf(dstW, 0), maxOf(dstH, 0))
+    return if (srcW.toLong() * dstH > srcH.toLong() * dstW) {
+        val h = (srcH.toLong() * dstW / srcW).toInt()   // источник шире: по ширине, поля сверху/снизу
+        val top = (dstH - h) / 2
+        Rect(0, top, dstW, top + h)
+    } else {
+        val w = (srcW.toLong() * dstH / srcH).toInt()   // источник уже: по высоте, поля слева/справа
+        val left = (dstW - w) / 2
+        Rect(left, 0, left + w, dstH)
     }
 }
