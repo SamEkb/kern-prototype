@@ -61,7 +61,7 @@ class SessionAndConnectionTest {
             }
         }
         server.start()
-        store = ServerSettingsStore(context)
+        store = ServerSettingsStore(context, com.siams.kern_prototype.data.settings.TestSecrets.cipher())
         save(login = "user")
         val loginClient = OkHttpClient.Builder().followRedirects(false).build()
         client = OkHttpClient.Builder()
@@ -97,6 +97,24 @@ class SessionAndConnectionTest {
             assertTrue(e.message!!.contains("изменены во время отправки"))
         }
         assertEquals(1, apiCalls())
+    }
+
+    /** R20: сохранённый пароль не расшифровывается — вход не выполняется, запрос не уходит. */
+    @Test
+    fun unavailablePasswordFailsFastWithoutLogin() {
+        // Тот же файл секретов, но другой ключ (как после восстановления на другом устройстве).
+        val otherKey = ServerSettingsStore(context, com.siams.kern_prototype.data.settings.TestSecrets.cipher(
+            com.siams.kern_prototype.data.settings.TestSecrets.newKey()))
+        val c = OkHttpClient.Builder().followRedirects(false)
+            .addInterceptor(SessionLoginInterceptor(otherKey, OkHttpClient.Builder().followRedirects(false).build())).build()
+        try {
+            c.newCall(Request.Builder().url("http://localhost/s8/api/v3/s8/analysis/source/x").build()).execute().close()
+            fail("вход с пустым паролем не должен выполняться")
+        } catch (e: IOException) {
+            assertTrue(e.message!!, e.message!!.contains("введите его заново"))
+        }
+        assertEquals(0, logins())
+        assertEquals(0, apiCalls())
     }
 
     @Test
@@ -261,5 +279,16 @@ class SessionAndConnectionTest {
     fun connectionTestReachableIsNotClaimedAsAuthorized() {
         apiResponse = { MockResponse().setResponseCode(404) }
         assertEquals(ConnectionResult.Reachable(404), test())
+    }
+
+    /** R20: недоступный пароль — «Проверить соединение» не выполняет сетевых запросов. */
+    @Test
+    fun connectionTestRefusesUnavailablePasswordWithoutNetwork() = runBlocking {
+        var clients = 0
+        val tester = ConnectionTester().apply { clientFactory = { clients++; OkHttpClient() } }
+        val r = tester.test(settings("user", password = "").copy(passwordUnavailable = true))
+        assertEquals(ConnectionResult.PasswordUnavailable, r)
+        assertEquals(0, clients)
+        assertEquals(0, paths.size)
     }
 }

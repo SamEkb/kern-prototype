@@ -11,6 +11,11 @@ data class ServerSettings(
     val password: String = "",
     /** Время последней успешной загрузки конфигурации полей (§5.1), мс; 0 = нет. */
     val fieldsConfigLoadedAt: Long = 0L,
+    /**
+     * R20: сохранённый пароль не расшифровывается (восстановление на другом устройстве, сброс
+     * ключа Keystore) — [password] пуст, пароль нужно ввести заново.
+     */
+    val passwordUnavailable: Boolean = false,
 ) {
     val isConfigured: Boolean get() = host.isNotBlank()
 

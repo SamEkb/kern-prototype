@@ -22,6 +22,8 @@ sealed interface ConnectionResult {
     data class LoginFailed(val httpCode: Int) : ConnectionResult
     data class ServerError(val httpCode: Int) : ConnectionResult
     data class Unreachable(val message: String) : ConnectionResult
+    /** R20: сохранённый пароль недоступен и не введён заново — проверка не выполнялась (без сети). */
+    data object PasswordUnavailable : ConnectionResult
 }
 
 /**
@@ -45,6 +47,8 @@ class ConnectionTester @Inject constructor() {
     }
 
     suspend fun test(settings: ServerSettings): ConnectionResult = withContext(Dispatchers.IO) {
+        // R20: входить с пустым вместо недоступного пароля нельзя — отказ без сетевых запросов.
+        if (settings.login.isNotBlank() && settings.passwordUnavailable) return@withContext ConnectionResult.PasswordUnavailable
         val client = clientFactory()
         try {
             if (settings.login.isNotBlank()) {

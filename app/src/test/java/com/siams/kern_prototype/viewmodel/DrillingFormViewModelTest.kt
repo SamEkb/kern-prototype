@@ -80,7 +80,7 @@ class DrillingFormViewModelTest {
     /** Открыть форму (как экран) и дождаться загрузки. */
     private fun open(drillingId: String? = null): DrillingFormViewModel {
         val args = drillingId?.let { mapOf(Routes.ARG_DRILLING_ID to it) } ?: emptyMap()
-        val vm = onMain { DrillingFormViewModel(repo, ServerSettingsStore(context), SavedStateHandle(args)).also { vms += it } }
+        val vm = onMain { DrillingFormViewModel(repo, ServerSettingsStore(context, com.siams.kern_prototype.data.settings.TestSecrets.cipher()), SavedStateHandle(args)).also { vms += it } }
         waitUntil { vm.loaded.value }
         return vm
     }

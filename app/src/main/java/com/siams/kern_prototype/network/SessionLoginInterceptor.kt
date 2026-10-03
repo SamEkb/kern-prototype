@@ -86,6 +86,10 @@ class SessionLoginInterceptor @Inject constructor(
                 throw IOException("Настройки сервера изменены во время отправки — отправка будет повторена")
             }
         }
+        // R20: пароль не расшифровался — входить с пустым паролем нельзя (не угадывать исход входа).
+        if (settings.login.isNotBlank() && settings.passwordUnavailable) {
+            throw IOException("Сохранённый пароль S900 недоступен на этом устройстве — введите его заново в настройках")
+        }
         val session = sessionFor(settings)
         val request = rewriteHost(chain.request(), settings)
 

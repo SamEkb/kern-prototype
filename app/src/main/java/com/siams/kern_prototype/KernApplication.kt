@@ -21,6 +21,7 @@ class KernApplication : Application(), Configuration.Provider {
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
     @Inject lateinit var syncManager: SyncManager
+    @Inject lateinit var serverSettings: com.siams.kern_prototype.data.settings.ServerSettingsStore
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -29,6 +30,11 @@ class KernApplication : Application(), Configuration.Provider {
         // R05: снять «зависшие» SENDING без активной задачи отправки (до действий пользователя).
         // Согласовано с постановкой в отправку общим замком SyncManager (не «до действий пользователя»).
         appScope.launch { runCatching { syncManager.reconcileStuck() } }
+        // R20: открытый пароль прежней версии → зашифрованное хранилище (до переноса он продолжает работать).
+        appScope.launch {
+            runCatching { serverSettings.migrateLegacyPassword() }
+                .onFailure { android.util.Log.w("KernApplication", "Перенос пароля не выполнен: ${it.message}") }
+        }
     }
 
     override val workManagerConfiguration: Configuration

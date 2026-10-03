@@ -75,7 +75,7 @@ class DrillingUploaderTest {
             db, db.drillingDao(), db.tableDao(), db.layerDao(), FileStorage(context), PassportCodec(json), json,
         )
         api = FakeS900()
-        settings = ServerSettingsStore(context)
+        settings = ServerSettingsStore(context, com.siams.kern_prototype.data.settings.TestSecrets.cipher())
         useServer("a.example")
         uploader = DrillingUploader(api, repo, PassportCodec(json), settings, FileStorage(context))
     }

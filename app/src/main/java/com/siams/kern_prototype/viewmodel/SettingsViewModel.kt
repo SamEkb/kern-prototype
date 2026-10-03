@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -43,8 +44,28 @@ class SettingsViewModel @Inject constructor(
      */
     val fields: List<PassportField> = PassportSchema.default
 
-    fun save(settings: ServerSettings) {
-        viewModelScope.launch { store.save(settings) }
+    /** R20: ошибка сохранения (например, шифрования пароля) — сообщение, а не падение. */
+    private val _saveError = MutableStateFlow<String?>(null)
+    val saveError: StateFlow<String?> = _saveError.asStateFlow()
+
+    fun consumeSaveError() {
+        _saveError.value = null
+    }
+
+    /**
+     * R20: форма экрана → настройки. Сохранённый пароль недоступен, а поле пароля пусто — пароль
+     * не введён заново: это НЕ намеренное удаление (секрет/признак не трогаются), вход не выполняется.
+     */
+    private suspend fun resolveForm(form: ServerSettings): ServerSettings {
+        val stored = store.settings.first()
+        return form.copy(passwordUnavailable = stored.passwordUnavailable && form.password.isEmpty())
+    }
+
+    fun save(form: ServerSettings) {
+        viewModelScope.launch {
+            runCatching { store.save(resolveForm(form)) }
+                .onFailure { _saveError.value = "Настройки не сохранены: ${it.message ?: it.javaClass.simpleName}" }
+        }
     }
 
     /**
@@ -56,10 +77,13 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { store.setFieldsLoadedAt(System.currentTimeMillis()) }
     }
 
-    fun testConnection(settings: ServerSettings) {
+    fun testConnection(form: ServerSettings) {
         viewModelScope.launch {
             _test.value = TestState.Testing
+            val settings = resolveForm(form)
             when (val r = tester.test(settings)) {
+                ConnectionResult.PasswordUnavailable ->
+                    _test.value = TestState.Failure("Сохранённый пароль недоступен на этом устройстве — введите его заново.")
                 is ConnectionResult.Reachable -> {
                     // R12: доступность ≠ авторизация; положительный критерий входа не согласован (Q10).
                     _test.value = TestState.Success(
@@ -67,8 +91,10 @@ class SettingsViewModel @Inject constructor(
                             "этой проверкой не подтверждаются — они проверяются при первой отправке.",
                     )
                     // §5.1: сохранить и авто-загрузить конфигурацию полей (встроенная схема, §10.1).
-                    store.save(settings)
-                    store.setFieldsLoadedAt(System.currentTimeMillis())
+                    runCatching {
+                        store.save(settings)
+                        store.setFieldsLoadedAt(System.currentTimeMillis())
+                    }.onFailure { _saveError.value = "Настройки не сохранены: ${it.message ?: it.javaClass.simpleName}" }
                 }
                 is ConnectionResult.AuthFailed ->
                     _test.value = TestState.Failure(

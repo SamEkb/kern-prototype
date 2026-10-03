@@ -1,13 +1,10 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Резервное копирование для Android 11 и ниже (API ≤ 30).
+   R20: секреты (зашифрованный пароль S900) не копируются: ключ Android Keystore в копию не
+   попадает, восстановленный шифротекст всё равно не расшифруется. Остальное (БД архива, снимки,
+   эталоны FFC, настройки без пароля) — по умолчанию; политика резервирования архива — Q14.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="file" path="datastore/kern_secrets.preferences_pb" />
 </full-backup-content>

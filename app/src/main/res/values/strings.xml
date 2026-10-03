@@ -83,6 +83,7 @@
     <string name="settings_https">"  HTTPS"</string>
     <string name="settings_login_label">Логин</string>
     <string name="settings_password_label">Пароль</string>
+    <string name="settings_password_unavailable">Сохранённый пароль недоступен на этом устройстве (восстановление из резервной копии или сброс защищённого хранилища). Введите пароль заново и сохраните.</string>
     <string name="settings_test">Проверить</string>
     <string name="settings_testing">Проверка соединения…</string>
     <string name="settings_fields_config_title">Конфигурация паспортных полей</string>

@@ -58,6 +58,7 @@ fun SettingsScreen(
 ) {
     val saved by vm.settings.collectAsStateWithLifecycle()
     val test by vm.test.collectAsStateWithLifecycle()
+    val saveError by vm.saveError.collectAsStateWithLifecycle()
 
     // Локальное редактируемое состояние формы; инициализируется из сохранённого.
     var host by remember(saved.host) { mutableStateOf(saved.host) }
@@ -137,10 +138,15 @@ fun SettingsScreen(
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Password),
                 modifier = Modifier.fillMaxWidth(),
             )
+            // R20: зашифрованный пароль не расшифровался (другое устройство / сброс ключа).
+            if (saved.passwordUnavailable && password.isEmpty()) {
+                Text(stringResource(R.string.settings_password_unavailable), style = Body4, color = Red30)
+            }
+            saveError?.let { Text(it, style = Body4, color = Red30) }
 
             Row(horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceMd)) {
                 Button(
-                    onClick = { vm.save(current()) },
+                    onClick = { vm.consumeSaveError(); vm.save(current()) },
                     modifier = Modifier.weight(1f),
                     enabled = formValid,
                 ) { Text(stringResource(R.string.common_save)) }
