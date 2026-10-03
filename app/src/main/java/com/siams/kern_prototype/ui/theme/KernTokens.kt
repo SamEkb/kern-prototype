@@ -28,6 +28,12 @@ object KernTokens {
     /** Выделяющая рамка (отметка «кадр снят» на переключателе освещения, FIXES §6). */
     val borderStrong: Dp = 2.dp
 
+    /** Боковая панель управления в двухпанельной компоновке экранов камеры (FIXES §8). */
+    val sidePanelWidth: Dp = 280.dp
+
+    /** Боковая панель редактора профилей (ползунки, автонастройка) — шире (FIXES §8). */
+    val sidePanelWideWidth: Dp = 360.dp
+
     /** Цвета статуса отправки долбления (§14.5, бейдж). */
     data class StatusColors(val content: Color, val container: Color)
 

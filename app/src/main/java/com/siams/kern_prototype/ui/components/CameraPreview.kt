@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,3 +55,16 @@ fun CameraPreview(
 }
 
 internal const val TEST_TAG = "camera-preview"
+
+/**
+ * FIXES §8: превью, переносимое между компоновками (одна панель ⇄ две панели) без пересоздания
+ * `TextureView` ([movableContentOf]). Если пересоздание всё же произойдёт (смена `Activity`),
+ * поверхность заново подключается к тому же контроллеру — R16 ([com.siams.kern_prototype.viewmodel.CameraScreenSession]).
+ */
+@Composable
+fun rememberMovableCameraPreview(
+    onSurfaceAvailable: (SurfaceTexture) -> Unit,
+    onSurfaceDestroyed: (SurfaceTexture) -> Boolean,
+): @Composable (Size?) -> Unit = remember {
+    movableContentOf { size: Size? -> CameraPreview(size, onSurfaceAvailable, onSurfaceDestroyed) }
+}

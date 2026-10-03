@@ -8,6 +8,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -47,7 +54,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.siams.kern_prototype.camera.CameraControllerState
 import com.siams.kern_prototype.camera.CameraLimits
 import com.siams.kern_prototype.domain.model.CameraProfile
-import com.siams.kern_prototype.ui.components.CameraPreview
+import com.siams.kern_prototype.ui.components.rememberMovableCameraPreview
+import com.siams.kern_prototype.ui.components.CameraScreenLayout
 import com.siams.kern_prototype.ui.components.LampSwitch
 import com.siams.kern_prototype.ui.theme.Blue
 import com.siams.kern_prototype.ui.theme.Body2Bold
@@ -148,268 +156,231 @@ fun CameraProfilesScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Ink)) {
-        // FIXES §1: кадр вписан с сохранением пропорций (без растяжения на весь экран).
-        CameraPreview(
-            previewSize = (cameraState as? CameraControllerState.Ready)?.previewSize,
-            onSurfaceAvailable = vm::onSurfaceAvailable,
-            onSurfaceDestroyed = vm::onSurfaceDestroyed,
+    // FIXES §8: превью переносится между компоновками без пересоздания TextureView.
+    val preview = rememberMovableCameraPreview(vm::onSurfaceAvailable, vm::onSurfaceDestroyed)
+    val previewSize = (cameraState as? CameraControllerState.Ready)?.previewSize
+
+    // Плашки поверх превью: подключение, ошибка камеры (R16 — повтор без выхода).
+    val previewOverlay: @Composable BoxScope.() -> Unit = {
+    (cameraState as? CameraControllerState.Opening)?.let {
+        Text(
+            "Подключение к камере Touptek…",
+            color = Color.White, style = Body2Bold,
+            modifier = Modifier.align(Alignment.Center),
         )
-        (cameraState as? CameraControllerState.Opening)?.let {
-            Text(
-                "Подключение к камере Touptek…",
-                color = Color.White, style = Body2Bold,
-                modifier = Modifier.align(Alignment.Center),
-            )
-        }
-        // R16: ошибка/отключение камеры — повтор подключения без выхода с экрана.
-        (cameraState as? CameraControllerState.Error)?.let { err ->
-            Column(
-                modifier = Modifier.align(Alignment.Center).padding(KernTokens.spaceLg),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
-            ) {
-                Text(err.message, color = Orange30, style = Body3Bold, textAlign = TextAlign.Center)
-                OutlinedButton(onClick = vm::reconnect, enabled = autoProc == AutoProc.NONE) {
-                    Text(androidx.compose.ui.res.stringResource(com.siams.kern_prototype.R.string.camera_reconnect), color = Color.White)
-                }
-            }
-        }
-
-        // Верх: назад, заголовок, выбор редактируемого профиля.
+    }
+    // R16: ошибка/отключение камеры — повтор подключения без выхода с экрана.
+    (cameraState as? CameraControllerState.Error)?.let { err ->
         Column(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .statusBarsPadding()
-                .fillMaxWidth()
-                .padding(KernTokens.spaceMd)
-                .background(Ink.copy(alpha = 0.5f), KernTokens.radiusCard)
-                .padding(KernTokens.spaceMd),
+            modifier = Modifier.align(Alignment.Center).padding(KernTokens.spaceLg),
+            horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = vm::requestExit, enabled = !busy) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад", tint = Color.White)
-                }
-                Text("Профиль камеры", style = Body2Bold, color = Color.White)
+            Text(err.message, color = Orange30, style = Body3Bold, textAlign = TextAlign.Center)
+            OutlinedButton(onClick = vm::reconnect, enabled = autoProc == AutoProc.NONE) {
+                Text(androidx.compose.ui.res.stringResource(com.siams.kern_prototype.R.string.camera_reconnect), color = Color.White)
             }
-            LampSwitch(selected = lamp, onSelect = vm::selectLamp, modifier = Modifier.fillMaxWidth(), enabled = !busy)
-            if (dirty.isNotEmpty()) {
-                Text(
-                    "Не сохранено: " + dirty.sortedBy { it.ordinal }.joinToString { it.ruLabel },
-                    style = Body4, color = Orange30,
-                )
-            }
+        }
+    }
+    }
 
-            // §1/§2: автоматические процедуры — визуально выделены и сверху.
-            Text("Автонастройка", style = Body3Bold, color = Color.White)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
-            ) {
-                OutlinedButton(
-                    onClick = vm::runAutoExposure,
-                    enabled = !busy && cameraReady && manualSupported,
-                    modifier = Modifier.weight(1f),
-                ) { Text("Автоэкспозиция") }
-                OutlinedButton(
-                    onClick = vm::runAutoWhiteBalance,
-                    enabled = !busy && cameraReady && manualSupported,
-                    modifier = Modifier.weight(1f),
-                ) { Text("Автобаланс") }
+    // Назад, заголовок, выбор профиля, автонастройка.
+    val top: @Composable ColumnScope.() -> Unit = {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = vm::requestExit, enabled = !busy) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад", tint = Color.White)
             }
+            Text("Профиль камеры", style = Body2Bold, color = Color.White)
+        }
+        LampSwitch(selected = lamp, onSelect = vm::selectLamp, modifier = Modifier.fillMaxWidth(), enabled = !busy)
+        if (dirty.isNotEmpty()) {
+            Text(
+                "Не сохранено: " + dirty.sortedBy { it.ordinal }.joinToString { it.ruLabel },
+                style = Body4, color = Orange30,
+            )
+        }
+
+        // §1/§2: автоматические процедуры — визуально выделены и сверху.
+        Text("Автонастройка", style = Body3Bold, color = Color.White)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
+        ) {
             OutlinedButton(
-                onClick = vm::requestFfc,
+                onClick = vm::runAutoExposure,
                 enabled = !busy && cameraReady && manualSupported,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.weight(1f),
+            ) { Text("Автоэкспозиция") }
+            OutlinedButton(
+                onClick = vm::runAutoWhiteBalance,
+                enabled = !busy && cameraReady && manualSupported,
+                modifier = Modifier.weight(1f),
+            ) { Text("Автобаланс") }
+        }
+        OutlinedButton(
+            onClick = vm::requestFfc,
+            enabled = !busy && cameraReady && manualSupported,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (profile.ffcTemplatePath.isNotBlank()) "Переснять эталон (FFC)" else "Коррекция освещения (FFC)")
+        }
+        if (profile.ffcTemplatePath.isNotBlank()) {
+            Text("Эталон FFC снят ✓ — применяется к снимкам", style = Body4, color = Blue)
+        }
+        if (busy) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
             ) {
-                Text(if (profile.ffcTemplatePath.isNotBlank()) "Переснять эталон (FFC)" else "Коррекция освещения (FFC)")
-            }
-            if (profile.ffcTemplatePath.isNotBlank()) {
-                Text("Эталон FFC снят ✓ — применяется к снимкам", style = Body4, color = Blue)
-            }
-            if (busy) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Text(
-                        when (autoProc) {
-                            AutoProc.EXPOSURE -> "Подбор экспозиции…"
-                            AutoProc.WHITE_BALANCE -> "Автобаланс белого…"
-                            AutoProc.FLAT_FIELD -> "Съёмка эталона FFC…"
-                            AutoProc.NONE -> ""
-                        },
-                        style = Body4, color = Color.White,
-                    )
-                }
-            }
-            Text(lastModifiedLabel(saved.lastModifiedAt), style = Body4, color = Gray40)
-
-            if (!manualSupported) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 Text(
-                    "⚠ Ручной режим (MANUAL_SENSOR) не поддерживается — превью может не меняться (§6.1).",
-                    style = Body4, color = Orange30,
+                    when (autoProc) {
+                        AutoProc.EXPOSURE -> "Подбор экспозиции…"
+                        AutoProc.WHITE_BALANCE -> "Автобаланс белого…"
+                        AutoProc.FLAT_FIELD -> "Съёмка эталона FFC…"
+                        AutoProc.NONE -> ""
+                    },
+                    style = Body4, color = Color.White,
                 )
             }
         }
+        Text(lastModifiedLabel(saved.lastModifiedAt), style = Body4, color = Gray40)
 
-        // Низ: слайдер выбранного параметра, лента параметров, сохранение.
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .fillMaxWidth()
-                .background(Ink.copy(alpha = 0.55f), KernTokens.radiusCard)
-                .padding(KernTokens.spaceLg),
-            verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
-        ) {
+        if (!manualSupported) {
             Text(
-                "${spec.label}: ${spec.format(spec.get(profile))}",
-                style = Body3Bold, color = Color.White,
-            )
-            Slider(
-                value = spec.toSlider(spec.get(profile)),
-                valueRange = spec.sliderRange,
-                onValueChange = { t -> vm.update(spec.set(profile, spec.fromSlider(t))) },
-                // R13: не конкурирует с автонастройкой; R14: фиксированный диапазон камеры — не двигается.
-                enabled = !busy && !spec.fixed,
-            )
-            // R14: сохранённое значение не переписывается — показываем, что уйдёт в SDK (только для
-            // параметров, чьё отправляемое значение считается так же, как в контроллере).
-            spec.sentToSdkHint(spec.get(profile))?.let { Text(it, style = Body4, color = Orange30) }
-            spec.note?.let { Text(it, style = Body4, color = Gray40) }
-            Row(
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
-            ) {
-                paramList.forEachIndexed { i, p ->
-                    ParamChip(
-                        label = p.label,
-                        value = p.format(p.get(profile)),
-                        selected = i == selected,
-                        onClick = { selected = i },
-                    )
-                }
-            }
-            // §4.2: перенос профилей между фотокабинами.
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        scope.launch {
-                            runCatching { vm.buildExportJson() }
-                                .onSuccess {
-                                    pendingExport = it
-                                    exportLauncher.launch("kern_camera_profiles.json")
-                                }
-                                .onFailure {
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        it.message ?: "Не удалось подготовить экспорт",
-                                        android.widget.Toast.LENGTH_LONG,
-                                    ).show()
-                                }
-                        }
-                    },
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                ) { Text("Экспорт") }
-                OutlinedButton(
-                    onClick = { importLauncher.launch(arrayOf("application/json", "*/*")) },
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                ) { Text("Импорт") }
-            }
-            Button(onClick = vm::requestSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                Text("Сохранить профиль «${lamp.ruLabel}»")
-            }
-        }
-
-        // §4.1: предупреждение о несопоставимости снимков при изменении уже сохранённого профиля.
-        if (showWarning) {
-            AlertDialog(
-                onDismissRequest = vm::dismissWarning,
-                title = { Text("Изменить сохранённый профиль?") },
-                text = {
-                    Text(
-                        "Изменение настроек профиля «${lamp.ruLabel}» может привести к тому, что порода " +
-                            "будет выглядеть иначе на новых снимках по сравнению с уже отснятыми материалами. " +
-                            "Это может нарушить сопоставимость снимков внутри долбления.\n\n" +
-                            "Сохранить изменения?",
-                    )
-                },
-                confirmButton = { TextButton(onClick = vm::confirmSave) { Text("Сохранить") } },
-                dismissButton = { TextButton(onClick = vm::dismissWarning) { Text("Отмена") } },
-            )
-        }
-
-        // §2.3: инструкция перед съёмкой эталона FFC.
-        if (showFfcInstruction) {
-            AlertDialog(
-                onDismissRequest = vm::dismissFfc,
-                title = { Text("Коррекция освещения (FFC)") },
-                text = {
-                    Text(
-                        "Поместите в фотокабину лист белой бумаги или иной равномерный белый фон так, " +
-                            "чтобы он заполнял весь кадр. После нажатия «Снять эталон» будет сделан " +
-                            "эталонный снимок для профиля «${lamp.ruLabel}» — по нему все последующие " +
-                            "снимки керна будут выравниваться по освещению. Эталон проверяется: без " +
-                            "пересвета, с достаточной яркостью и равномерным фоном; непригодный будет " +
-                            "отклонён, а прежний эталон — сохранён.",
-                    )
-                },
-                confirmButton = { TextButton(onClick = vm::confirmFfc) { Text("Снять эталон") } },
-                dismissButton = { TextButton(onClick = vm::dismissFfc) { Text("Отмена") } },
-            )
-        }
-
-        // R23: несохранённые черновики при выходе.
-        exitPrompt?.let { lamps ->
-            AlertDialog(
-                onDismissRequest = vm::cancelExit,
-                title = { Text("Сохранить изменения профилей?") },
-                text = {
-                    Text(
-                        "Не сохранены изменения профилей: " +
-                            lamps.sortedBy { it.ordinal }.joinToString { "«${it.ruLabel}»" } + ". " +
-                            "Сохранение изменит профили, по которым идёт съёмка: новые снимки могут " +
-                            "отличаться от уже отснятых.",
-                    )
-                },
-                confirmButton = { TextButton(onClick = vm::saveAllAndExit) { Text("Сохранить всё") } },
-                dismissButton = {
-                    Row {
-                        TextButton(onClick = vm::discardAndExit) { Text("Не сохранять") }
-                        TextButton(onClick = vm::cancelExit) { Text("Остаться") }
-                    }
-                },
-            )
-        }
-
-        // §4.2: то же предупреждение о несопоставимости снимков перед импортом профилей.
-        if (showImportWarning) {
-            AlertDialog(
-                onDismissRequest = vm::dismissImport,
-                title = { Text("Импортировать профили?") },
-                text = {
-                    Text(
-                        "Импорт заменит текущие профили камеры (дневной и УФ) параметрами из файла. " +
-                            "Это может привести к тому, что порода будет выглядеть иначе на новых снимках " +
-                            "по сравнению с уже отснятыми материалами, и нарушить их сопоставимость.\n\n" +
-                            (if (dirty.isNotEmpty()) "Несохранённые изменения будут потеряны: " +
-                                dirty.sortedBy { it.ordinal }.joinToString { it.ruLabel } + ".\n\n" else "") +
-                            "Применить импортированные профили?",
-                    )
-                },
-                confirmButton = { TextButton(onClick = vm::confirmImport) { Text("Импортировать") } },
-                dismissButton = { TextButton(onClick = vm::dismissImport) { Text("Отмена") } },
+                "⚠ Ручной режим (MANUAL_SENSOR) не поддерживается — превью может не меняться (§6.1).",
+                style = Body4, color = Orange30,
             )
         }
     }
+
+    // Ползунок выбранного параметра, лента параметров, сохранение и перенос.
+    val bottom: @Composable ColumnScope.() -> Unit = {
+        Text(
+            "${spec.label}: ${spec.format(spec.get(profile))}",
+            style = Body3Bold, color = Color.White,
+        )
+        Slider(
+            value = spec.toSlider(spec.get(profile)),
+            valueRange = spec.sliderRange,
+            onValueChange = { t -> vm.update(spec.set(profile, spec.fromSlider(t))) },
+            // R13: не конкурирует с автонастройкой; R14: фиксированный диапазон камеры — не двигается.
+            enabled = !busy && !spec.fixed,
+        )
+        // R14: сохранённое значение не переписывается — показываем, что уйдёт в SDK (только для
+        // параметров, чьё отправляемое значение считается так же, как в контроллере).
+        spec.sentToSdkHint(spec.get(profile))?.let { Text(it, style = Body4, color = Orange30) }
+        spec.note?.let { Text(it, style = Body4, color = Gray40) }
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
+        ) {
+            paramList.forEachIndexed { i, p ->
+                ParamChip(
+                    label = p.label,
+                    value = p.format(p.get(profile)),
+                    selected = i == selected,
+                    onClick = { selected = i },
+                )
+            }
+        }
+        // §4.2: перенос профилей между фотокабинами.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
+        ) {
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        runCatching { vm.buildExportJson() }
+                            .onSuccess {
+                                pendingExport = it
+                                exportLauncher.launch("kern_camera_profiles.json")
+                            }
+                            .onFailure {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    it.message ?: "Не удалось подготовить экспорт",
+                                    android.widget.Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                    }
+                },
+                enabled = !busy,
+                modifier = Modifier.weight(1f),
+            ) { Text("Экспорт") }
+            OutlinedButton(
+                onClick = { importLauncher.launch(arrayOf("application/json", "*/*")) },
+                enabled = !busy,
+                modifier = Modifier.weight(1f),
+            ) { Text("Импорт") }
+        }
+        Button(onClick = vm::requestSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text("Сохранить профиль «${lamp.ruLabel}»")
+        }
+    }
+
+    CameraScreenLayout(
+        previewSize = previewSize,
+        preview = preview,
+        panelWidth = KernTokens.sidePanelWideWidth,
+        previewOverlay = previewOverlay,
+        portraitOverlay = {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .fillMaxWidth()
+                    .padding(KernTokens.spaceMd)
+                    .background(Ink.copy(alpha = 0.5f), KernTokens.radiusCard)
+                    .padding(KernTokens.spaceMd),
+                verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
+                content = top,
+            )
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .fillMaxWidth()
+                    .background(Ink.copy(alpha = 0.55f), KernTokens.radiusCard)
+                    .padding(KernTokens.spaceLg),
+                verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
+                content = bottom,
+            )
+        },
+        // Альбомная ориентация / планшет: параметры справа от кадра (прокрутка).
+        panelArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
+        panelAlignment = Alignment.Start,
+        panelPadding = KernTokens.spaceMd,
+        panel = {
+            top()
+            bottom()
+        },
+        modifier = Modifier.background(Ink),
+    )
+
+    // Подтверждения — вне ветвления компоновок: показываются в любой ориентации.
+    ProfileEditorDialogs(
+        profileEditorDialogs(
+            lamp = lamp,
+            dirty = dirty,
+            showWarning = showWarning,
+            showFfcInstruction = showFfcInstruction,
+            exitPrompt = exitPrompt,
+            showImportWarning = showImportWarning,
+            actions = ProfileEditorDialogActions(
+                confirmSave = vm::confirmSave,
+                dismissWarning = vm::dismissWarning,
+                confirmFfc = vm::confirmFfc,
+                dismissFfc = vm::dismissFfc,
+                saveAllAndExit = vm::saveAllAndExit,
+                discardAndExit = vm::discardAndExit,
+                cancelExit = vm::cancelExit,
+                confirmImport = vm::confirmImport,
+                dismissImport = vm::dismissImport,
+            ),
+        ),
+    )
 }
 
 /** Подпись «последнее изменение профиля» (§4.1). */

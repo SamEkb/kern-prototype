@@ -25,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,10 +62,12 @@ fun SettingsScreen(
     val saveError by vm.saveError.collectAsStateWithLifecycle()
 
     // Локальное редактируемое состояние формы; инициализируется из сохранённого.
-    var host by remember(saved.host) { mutableStateOf(saved.host) }
-    var port by remember(saved.port) { mutableStateOf(saved.port.toString()) }
-    var https by remember(saved.useHttps) { mutableStateOf(saved.useHttps) }
-    var login by remember(saved.login) { mutableStateOf(saved.login) }
+    // FIXES §8: несохранённый ввод переживает пересоздание экрана (rememberSaveable). Пароль — нет:
+    // сохранённое состояние экрана может записываться системой на диск (R20).
+    var host by rememberSaveable(saved.host) { mutableStateOf(saved.host) }
+    var port by rememberSaveable(saved.port) { mutableStateOf(saved.port.toString()) }
+    var https by rememberSaveable(saved.useHttps) { mutableStateOf(saved.useHttps) }
+    var login by rememberSaveable(saved.login) { mutableStateOf(saved.login) }
     var password by remember(saved.password) { mutableStateOf(saved.password) }
 
     fun current() = ServerSettings(

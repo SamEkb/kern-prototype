@@ -3,8 +3,15 @@ package com.siams.kern_prototype.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -38,7 +45,8 @@ import com.siams.kern_prototype.R
 import com.siams.kern_prototype.camera.CameraControllerState
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
-import com.siams.kern_prototype.ui.components.CameraPreview
+import com.siams.kern_prototype.ui.components.rememberMovableCameraPreview
+import com.siams.kern_prototype.ui.components.CameraScreenLayout
 import com.siams.kern_prototype.ui.components.LampSwitch
 import com.siams.kern_prototype.ui.theme.Body2Bold
 import com.siams.kern_prototype.ui.theme.Body3
@@ -91,105 +99,122 @@ fun CaptureScreen(
     val capturedLamps by vm.capturedLamps.collectAsStateWithLifecycle()
     val manualSupported = (cameraState as? CameraControllerState.Ready)?.manualSupported ?: true
 
-    Box(Modifier.fillMaxSize().background(Ink)) {
-        // FIXES §1: кадр вписан с сохранением пропорций (без растяжения на весь экран).
-        CameraPreview(
-            previewSize = (cameraState as? CameraControllerState.Ready)?.previewSize,
-            onSurfaceAvailable = vm::onSurfaceAvailable,
-            onSurfaceDestroyed = vm::onSurfaceDestroyed,
-        )
-        // Плашка статуса подключения USB-камеры поверх превью.
-        (cameraState as? CameraControllerState.Opening)?.let {
+    // FIXES §8: превью переносится между компоновками без пересоздания TextureView.
+    val preview = rememberMovableCameraPreview(vm::onSurfaceAvailable, vm::onSurfaceDestroyed)
+    val previewSize = (cameraState as? CameraControllerState.Ready)?.previewSize
+
+    // Состояние стола и камеры (номер стола, параметры, ошибки, переподключение).
+    val hud: @Composable ColumnScope.() -> Unit = {
+        // FIXES §6: отметка «снят» — на переключателе освещения; здесь только номер стола.
+        Text(stringResource(R.string.table_number, tableNumber), style = Body2Bold, color = Color.White)
+        Text(profileLine(profile, vm.controller.capabilities.supportsFocus), style = Body4, color = Color.White.copy(alpha = 0.85f))
+        if (!manualSupported) {
             Text(
-                stringResource(R.string.capture_usb_connecting),
-                color = Color.White, style = Body2Bold,
-                modifier = Modifier.align(Alignment.Center),
+                stringResource(R.string.capture_manual_unsupported),
+                style = Body4, color = Orange30,
             )
         }
-
-        // Верхний HUD: стол, тип освещения, предупреждение о ручном режиме.
-        // Полупрозрачная подложка — читаемость белого текста поверх светлых сцен.
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .statusBarsPadding()
-                .fillMaxWidth()
-                .padding(KernTokens.spaceMd)
-                .background(Ink.copy(alpha = 0.45f), KernTokens.radiusCard)
-                .padding(KernTokens.spaceMd),
-            verticalArrangement = Arrangement.spacedBy(KernTokens.spaceXs),
-        ) {
-            // FIXES §6: отметка «снят» — на переключателе освещения; здесь только номер стола.
-            Text(stringResource(R.string.table_number, tableNumber), style = Body2Bold, color = Color.White)
-            Text(profileLine(profile, vm.controller.capabilities.supportsFocus), style = Body4, color = Color.White.copy(alpha = 0.85f))
-            if (!manualSupported) {
-                Text(
-                    stringResource(R.string.capture_manual_unsupported),
-                    style = Body4, color = Orange30,
-                )
-            }
-            (cameraState as? CameraControllerState.Error)?.let {
-                Text(stringResource(R.string.capture_camera_error, it.message), style = Body4, color = Orange30)
-                // R16: повтор подключения без выхода с экрана.
-                OutlinedButton(onClick = vm::reconnect, enabled = !capturing) {
-                    Text(stringResource(R.string.camera_reconnect), color = Color.White)
-                }
-            }
-        }
-
-        // Нижний HUD: переключатель, спуск, новый стол, назад.
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .fillMaxWidth()
-                .padding(KernTokens.spaceLg),
-            verticalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            // R10/FIXES §7: во время снимка освещение, новый стол и выход недоступны.
-            LampSwitch(
-                selected = lamp, onSelect = vm::switchLamp, modifier = Modifier.fillMaxWidth(), enabled = !capturing,
-                // Слои стола из Room: «снят» — только после фиксации слоя, не после нажатия Snap.
-                captured = capturedLamps,
-            )
-
-            Button(
-                onClick = vm::capture,
-                // Ready — обычная съёмка; Error(canRetry) — снимок сначала переподключит камеру.
-                enabled = !capturing && (
-                    cameraState is CameraControllerState.Ready ||
-                        (cameraState as? CameraControllerState.Error)?.canRetry == true
-                    ),
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(),
-                modifier = Modifier.size(84.dp),
-            ) {
-                if (capturing) {
-                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
-                } else {
-                    Icon(Icons.Outlined.Camera, contentDescription = stringResource(R.string.capture_shoot_cd), modifier = Modifier.size(36.dp))
-                }
-            }
-            if (capturing) {
-                Text(stringResource(R.string.capture_in_progress), style = Body3, color = Color.White)
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
-            ) {
-                OutlinedButton(onClick = onBack, enabled = !capturing, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                    Text(stringResource(R.string.capture_done))
-                }
-                OutlinedButton(onClick = vm::newTable, enabled = !capturing, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Outlined.Add, contentDescription = null)
-                    Text(stringResource(R.string.capture_new_table))
-                }
+        (cameraState as? CameraControllerState.Error)?.let {
+            Text(stringResource(R.string.capture_camera_error, it.message), style = Body4, color = Orange30)
+            // R16: повтор подключения без выхода с экрана.
+            OutlinedButton(onClick = vm::reconnect, enabled = !capturing) {
+                Text(stringResource(R.string.camera_reconnect), color = Color.White)
             }
         }
     }
+
+    // Переключатель, спуск, новый стол, назад.
+    val controls: @Composable ColumnScope.() -> Unit = {
+        // R10/FIXES §7: во время снимка освещение, новый стол и выход недоступны.
+        LampSwitch(
+            selected = lamp, onSelect = vm::switchLamp, modifier = Modifier.fillMaxWidth(), enabled = !capturing,
+            // Слои стола из Room: «снят» — только после фиксации слоя, не после нажатия Snap.
+            captured = capturedLamps,
+        )
+
+        Button(
+            onClick = vm::capture,
+            // Ready — обычная съёмка; Error(canRetry) — снимок сначала переподключит камеру.
+            enabled = !capturing && (
+                cameraState is CameraControllerState.Ready ||
+                    (cameraState as? CameraControllerState.Error)?.canRetry == true
+                ),
+            shape = CircleShape,
+            colors = ButtonDefaults.buttonColors(),
+            modifier = Modifier.size(84.dp),
+        ) {
+            if (capturing) {
+                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
+            } else {
+                Icon(Icons.Outlined.Camera, contentDescription = stringResource(R.string.capture_shoot_cd), modifier = Modifier.size(36.dp))
+            }
+        }
+        if (capturing) {
+            Text(stringResource(R.string.capture_in_progress), style = Body3, color = Color.White)
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
+        ) {
+            OutlinedButton(onClick = onBack, enabled = !capturing, modifier = Modifier.weight(1f)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                Text(stringResource(R.string.capture_done))
+            }
+            OutlinedButton(onClick = vm::newTable, enabled = !capturing, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Outlined.Add, contentDescription = null)
+                Text(stringResource(R.string.capture_new_table))
+            }
+        }
+    }
+
+    val opening = cameraState is CameraControllerState.Opening
+
+    CameraScreenLayout(
+        previewSize = previewSize,
+        preview = preview,
+        panelWidth = KernTokens.sidePanelWidth,
+        previewOverlay = { if (opening) ConnectingLabel(Modifier.align(Alignment.Center)) },
+        portraitOverlay = {
+            // Верхний HUD; полупрозрачная подложка — читаемость белого текста поверх светлых сцен.
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .fillMaxWidth()
+                    .padding(KernTokens.spaceMd)
+                    .background(Ink.copy(alpha = 0.45f), KernTokens.radiusCard)
+                    .padding(KernTokens.spaceMd),
+                verticalArrangement = Arrangement.spacedBy(KernTokens.spaceXs),
+                content = hud,
+            )
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .fillMaxWidth()
+                    .padding(KernTokens.spaceLg),
+                verticalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                content = controls,
+            )
+        },
+        // Альбомная ориентация / планшет: панель управления справа от кадра.
+        panelArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
+        panelAlignment = Alignment.CenterHorizontally,
+        panelPadding = KernTokens.spaceLg,
+        panel = {
+            hud()
+            controls()
+        },
+        modifier = Modifier.background(Ink),
+    )
+}
+
+/** Плашка статуса подключения USB-камеры поверх превью. */
+@Composable
+private fun ConnectingLabel(modifier: Modifier) {
+    Text(stringResource(R.string.capture_usb_connecting), color = Color.White, style = Body2Bold, modifier = modifier)
 }
 
 /** Строка параметров профиля в HUD; фокус — только если камера его применяет (FIXES §3). */
