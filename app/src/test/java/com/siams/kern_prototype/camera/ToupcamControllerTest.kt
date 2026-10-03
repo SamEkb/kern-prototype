@@ -82,6 +82,12 @@ class ToupcamControllerTest {
         return false
     }
 
+    /** FIXES §3: фокус у Touptek механический — интерфейс его не показывает. */
+    @Test
+    fun touptekDoesNotSupportFocus() {
+        assertFalse(controller().capabilities.supportsFocus)
+    }
+
     @Test
     fun normalCaptureWritesFile() = runBlocking {
         val c = controller()

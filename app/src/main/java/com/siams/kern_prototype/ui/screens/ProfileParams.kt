@@ -1,5 +1,6 @@
 package com.siams.kern_prototype.ui.screens
 
+import com.siams.kern_prototype.camera.CameraCapabilities
 import com.siams.kern_prototype.camera.CameraLimits
 import com.siams.kern_prototype.domain.model.CameraProfile
 import kotlin.math.exp
@@ -55,7 +56,10 @@ internal data class ParamSpec(
  * R14: выдержка, усиление и гамма — в границах ТЕКУЩЕЙ камеры (тех же, что при применении профиля);
  * источник границ (SDK или запасной) показывается в подсказке.
  */
-internal fun profileParams(limits: CameraLimits): List<ParamSpec> {
+internal fun profileParams(
+    limits: CameraLimits,
+    capabilities: CameraCapabilities = CameraCapabilities(),
+): List<ParamSpec> {
     fun source(r: CameraLimits.Range) = if (r.fromSdk) null else "границы: запасные (${r.note})"
     val e = limits.exposureUs
     val g = limits.gainPercent
@@ -83,12 +87,6 @@ internal fun profileParams(limits: CameraLimits): List<ParamSpec> {
             clampedLikeController = true,
         ),
         ParamSpec(
-            "Фокус", 0f, 10f,
-            get = { it.focusDistance },
-            set = { p, v -> p.copy(focusDistance = v) },
-            format = { if (it < 0.05f) "∞" else "%.1f дптр".format(it) },
-        ),
-        ParamSpec(
             "WB R", 1f, 4f,
             get = { it.wbRedGain },
             set = { p, v -> p.copy(wbRedGain = v) },
@@ -106,5 +104,13 @@ internal fun profileParams(limits: CameraLimits): List<ParamSpec> {
             set = { p, v -> p.copy(wbBlueGain = v) },
             format = { "%.2f".format(it) },
         ),
+    ) + listOfNotNull(
+        // FIXES §3: фокус — только если камера его применяет (у Touptek — нет).
+        ParamSpec(
+            "Фокус", 0f, 10f,
+            get = { it.focusDistance },
+            set = { p, v -> p.copy(focusDistance = v) },
+            format = { if (it < 0.05f) "∞" else "%.1f дптр".format(it) },
+        ).takeIf { capabilities.supportsFocus },
     )
 }

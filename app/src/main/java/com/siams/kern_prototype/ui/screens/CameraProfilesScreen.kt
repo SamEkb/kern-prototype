@@ -114,7 +114,8 @@ fun CameraProfilesScreen(
     val manualSupported = (cameraState as? CameraControllerState.Ready)?.manualSupported ?: true
     val busy = autoProc != AutoProc.NONE
     val limits by vm.limits.collectAsStateWithLifecycle()
-    val paramList = remember(limits) { profileParams(limits) }
+    val capabilities = vm.capabilities
+    val paramList = remember(limits, capabilities) { profileParams(limits, capabilities) }
     val spec = paramList[selected]
 
     // §4.2: экспорт/импорт профилей через системный выбор файла (SAF).

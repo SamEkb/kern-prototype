@@ -25,6 +25,9 @@ object KernTokens {
     // Минимальная тач-цель (§14.1)
     val minTouch: Dp = 48.dp
 
+    /** Выделяющая рамка (отметка «кадр снят» на переключателе освещения, FIXES §6). */
+    val borderStrong: Dp = 2.dp
+
     /** Цвета статуса отправки долбления (§14.5, бейдж). */
     data class StatusColors(val content: Color, val container: Color)
 

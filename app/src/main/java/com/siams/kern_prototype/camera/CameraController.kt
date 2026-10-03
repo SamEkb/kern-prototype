@@ -49,6 +49,12 @@ class CameraController @Inject constructor(
 
     private var cameraId: String? = null
     private var characteristics: CameraCharacteristics? = null
+
+    /** FIXES §3: фокус — только у объектива с ручной фокусировкой (минимальная дистанция > 0). */
+    override val capabilities: CameraCapabilities
+        get() = CameraCapabilities(
+            supportsFocus = (characteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f,
+        )
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null

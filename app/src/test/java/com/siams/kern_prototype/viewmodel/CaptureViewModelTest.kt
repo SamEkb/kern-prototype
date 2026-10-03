@@ -193,4 +193,20 @@ class CaptureViewModelTest {
         assertEquals("кадр сохранён с освещением момента нажатия", LampType.DAYLIGHT, layer.lampType)
         assertEquals(emptyList<LampType>(), camera.switches)
     }
+
+    /** FIXES §6: «снят» — по слоям стола из Room: после фиксации слоя, а не после нажатия спуска. */
+    @Test
+    fun capturedMarkAppearsOnlyAfterLayerIsSaved() = runBlocking {
+        val camera = SlowCamera()
+        val vm = newVm(camera)
+        onMain { vm.capture() }
+        withTimeout(3_000) { camera.started.await() }
+        Thread.sleep(100)
+        assertEquals("снимок идёт — отметки нет", emptySet<LampType>(), vm.capturedLamps.value)
+
+        camera.release.complete(Unit)
+        waitUntil { vm.capturedLamps.value == setOf(LampType.DAYLIGHT) }
+        val layers = repo.getDrillingContent(vm.drillingId)!!.tables.single().layers
+        assertEquals("отметка соответствует записанному слою", listOf(LampType.DAYLIGHT), layers.map { it.lampType })
+    }
 }

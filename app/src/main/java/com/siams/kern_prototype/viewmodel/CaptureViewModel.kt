@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -65,6 +66,14 @@ class CaptureViewModel @Inject constructor(
     val table: StateFlow<TableWithLayers?> = _tableId
         .flatMapLatest { id -> if (id == null) flowOf(null) else repository.observeTable(id) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * FIXES §6: освещения, кадр которых ЗАФИКСИРОВАН в текущем столе — по слоям из Room, поэтому
+     * отметка «снят» появляется только после записи слоя, а не после нажатия спуска.
+     */
+    val capturedLamps: StateFlow<Set<LampType>> = table
+        .map { t -> t?.layers?.map { it.lampType }?.toSet().orEmpty() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     // R16: подключение, его повтор, поверхность превью, восстановление по USB.
     private val session = CameraScreenSession(

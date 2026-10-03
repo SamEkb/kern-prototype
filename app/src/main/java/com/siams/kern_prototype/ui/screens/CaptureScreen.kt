@@ -79,7 +79,6 @@ fun CaptureScreen(
     val capturing by vm.capturing.collectAsStateWithLifecycle()
     val profile by vm.activeProfile.collectAsStateWithLifecycle()
     val cameraState by vm.cameraState.collectAsStateWithLifecycle()
-    val table by vm.table.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     // Системный «Назад» во время снимка не закрывает экран (кадр не должен потеряться).
     androidx.activity.compose.BackHandler(enabled = capturing) {}
@@ -91,8 +90,7 @@ fun CaptureScreen(
         }
     }
 
-    val hasDaylight = table?.layers?.any { it.lampType == LampType.DAYLIGHT } == true
-    val hasUf = table?.layers?.any { it.lampType == LampType.UF } == true
+    val capturedLamps by vm.capturedLamps.collectAsStateWithLifecycle()
     val manualSupported = (cameraState as? CameraControllerState.Ready)?.manualSupported ?: true
 
     Box(Modifier.fillMaxSize().background(Ink)) {
@@ -135,14 +133,9 @@ fun CaptureScreen(
                 .padding(KernTokens.spaceMd),
             verticalArrangement = Arrangement.spacedBy(KernTokens.spaceXs),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.table_number, tableNumber), style = Body2Bold, color = Color.White)
-                androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
-                CaptureIndicator(stringResource(R.string.capture_indicator_daylight), hasDaylight, Color.White)
-                androidx.compose.foundation.layout.Spacer(Modifier.size(KernTokens.spaceSm))
-                CaptureIndicator(stringResource(R.string.common_uf), hasUf, UvYellow)
-            }
-            Text(profileLine(profile), style = Body4, color = Color.White.copy(alpha = 0.85f))
+            // FIXES §6: отметка «снят» — на переключателе освещения; здесь только номер стола.
+            Text(stringResource(R.string.table_number, tableNumber), style = Body2Bold, color = Color.White)
+            Text(profileLine(profile, vm.controller.capabilities.supportsFocus), style = Body4, color = Color.White.copy(alpha = 0.85f))
             if (!manualSupported) {
                 Text(
                     stringResource(R.string.capture_manual_unsupported),
@@ -169,7 +162,11 @@ fun CaptureScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // R10/FIXES §7: во время снимка освещение, новый стол и выход недоступны.
-            LampSwitch(selected = lamp, onSelect = vm::switchLamp, modifier = Modifier.fillMaxWidth(), enabled = !capturing)
+            LampSwitch(
+                selected = lamp, onSelect = vm::switchLamp, modifier = Modifier.fillMaxWidth(), enabled = !capturing,
+                // Слои стола из Room: «снят» — только после фиксации слоя, не после нажатия Snap.
+                captured = capturedLamps,
+            )
 
             Button(
                 onClick = vm::capture,
@@ -209,18 +206,11 @@ fun CaptureScreen(
     }
 }
 
-@Composable
-private fun CaptureIndicator(label: String, done: Boolean, activeColor: Color) {
-    Text(
-        text = if (done) stringResource(R.string.capture_indicator_done, label) else label,
-        style = Body3,
-        color = if (done) activeColor else Color.White.copy(alpha = 0.4f),
-        textAlign = TextAlign.Center,
-    )
-}
-
-private fun profileLine(p: CameraProfile): String {
+/** Строка параметров профиля в HUD; фокус — только если камера его применяет (FIXES §3). */
+internal fun profileLine(p: CameraProfile, supportsFocus: Boolean): String {
     val shutter = if (p.exposureTimeNs > 0) "1/${(1_000_000_000.0 / p.exposureTimeNs).toInt()}с" else "—"
+    val base = "Выдержка $shutter · ISO ${p.iso} · WB ${p.wbRedGain}/${p.wbBlueGain}"
+    if (!supportsFocus) return base
     val focus = if (p.focusDistance == 0f) "∞" else String.format("%.2f", p.focusDistance)
-    return "Выдержка $shutter · ISO ${p.iso} · WB ${p.wbRedGain}/${p.wbBlueGain} · Фокус $focus"
+    return "$base · Фокус $focus"
 }

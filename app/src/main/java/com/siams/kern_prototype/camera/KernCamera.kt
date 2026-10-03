@@ -44,6 +44,9 @@ interface KernCamera {
      */
     val limits: StateFlow<CameraLimits> get() = FALLBACK_LIMITS
 
+    /** FIXES §3: возможности камеры для интерфейса. По умолчанию — без фокуса. */
+    val capabilities: CameraCapabilities get() = CameraCapabilities()
+
     /** Открыть/подключить камеру, выбрать размеры, загрузить профиль под [lampType]. */
     suspend fun open(lampType: LampType)
 

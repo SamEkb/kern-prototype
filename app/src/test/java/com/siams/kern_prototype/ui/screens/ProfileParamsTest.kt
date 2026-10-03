@@ -60,7 +60,7 @@ class ProfileParamsTest {
 
     @Test
     fun hintOnlyForParamsClampedLikeTheControllerAndSaysSentToSdk() {
-        val all = profileParams(limits(gain = Range(100, 800, fromSdk = true)))
+        val all = profileParams(limits(gain = Range(100, 800, fromSdk = true)), com.siams.kern_prototype.camera.CameraCapabilities(supportsFocus = true))
         assertEquals(setOf("Выдержка", "Усиление", "Гамма"), all.filter { it.clampedLikeController }.map { it.label }.toSet())
 
         val gain = all.single { it.label == "Усиление" }
@@ -75,5 +75,22 @@ class ProfileParamsTest {
             assertNull("$label: расчёт отправляемого значения не общий с контроллером", s.sentToSdkHint(s.max + 5f))
             assertNull(s.sentToSdkHint(s.min - 5f))
         }
+    }
+
+    /** FIXES §3: «Фокус» — только у камеры, которая его применяет (у Touptek — нет). */
+    @Test
+    fun focusIsShownOnlyWhenCameraSupportsIt() {
+        val touptek = profileParams(limits())
+        assertFalse(touptek.any { it.label == "Фокус" })
+        assertEquals(listOf("Выдержка", "Усиление", "Гамма", "WB R", "WB G", "WB B"), touptek.map { it.label })
+        val camera2 = profileParams(limits(), com.siams.kern_prototype.camera.CameraCapabilities(supportsFocus = true))
+        assertTrue(camera2.any { it.label == "Фокус" })
+    }
+
+    @Test
+    fun hudLineHidesFocusWithoutSupport() {
+        val p = CameraProfile.defaultFor(LampType.DAYLIGHT)
+        assertFalse(profileLine(p, supportsFocus = false).contains("Фокус"))
+        assertTrue(profileLine(p, supportsFocus = true).contains("Фокус"))
     }
 }

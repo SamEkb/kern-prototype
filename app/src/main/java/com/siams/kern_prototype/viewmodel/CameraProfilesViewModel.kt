@@ -101,6 +101,9 @@ class CameraProfilesViewModel @Inject constructor(
     /** R14: границы текущей камеры — те же, что использует применение профиля. */
     val limits: StateFlow<com.siams.kern_prototype.camera.CameraLimits> = controller.limits
 
+    /** FIXES §3: возможности активной камеры (для показа параметров). */
+    val capabilities: com.siams.kern_prototype.camera.CameraCapabilities get() = controller.capabilities
+
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 

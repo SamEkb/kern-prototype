@@ -304,10 +304,10 @@ private fun DepthEditor(
             Text(stringResource(R.string.table_view_depth_apply_all))
         }
     }
-    Row(
+    // FIXES §10: длинные подписи — поля друг под другом на всю ширину (в портрете не обрезаются).
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
-        verticalAlignment = Alignment.Top,
+        verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
     ) {
         OutlinedTextField(
             value = depth.upper, onValueChange = { onChange(DepthInput.Field.UPPER, it) },
@@ -316,8 +316,8 @@ private fun DepthEditor(
             isError = upperError != null,
             supportingText = upperError?.let { { Text(it) } },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
-            modifier = Modifier.weight(1f),
+            keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth(),
         )
         OutlinedTextField(
             value = depth.lower, onValueChange = { onChange(DepthInput.Field.LOWER, it) },
@@ -326,8 +326,8 @@ private fun DepthEditor(
             isError = lowerError != null,
             supportingText = lowerError?.let { { Text(it) } },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
-            modifier = Modifier.weight(1f),
+            keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth(),
         )
     }
     // R15: глубины сохраняются автоматически; при ошибке — черновик.
