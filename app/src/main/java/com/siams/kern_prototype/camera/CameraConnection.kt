@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal class CameraConnection private constructor(
     val device: ToupcamDevice,
-    private val onEvent: (ToupcamDevice, Int, Long) -> Unit,
+    private val onEvent: (ToupcamDevice, Int, Long, Long) -> Unit,
 ) {
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "toupcam-connection") }
     private val dispatcher = executor.asCoroutineDispatcher()
@@ -45,24 +45,32 @@ internal class CameraConnection private constructor(
     val isClosed: Boolean get() = closing.get()
 
     /** Номер последнего события, ПОСТУПИВШЕГО в очередь (присваивается в момент поступления). */
-    private val arrivals = java.util.concurrent.atomic.AtomicLong(0)
+    private var arrivals = 0L
+
+    /** Номер поступления и постановка в очередь — атомарно относительно [arrivalBoundary]. */
+    private val arrivalLock = Any()
 
     /**
      * Граница «после этого момента»: номер последнего поступившего события. Событие с номером
-     * больше границы поступило в очередь позже её фиксации.
+     * больше границы поступило в очередь позже её фиксации; событие с номером не больше границы
+     * уже стоит в очереди — задача, поставленная после фиксации, выполнится после его обработки.
      */
-    fun arrivalBoundary(): Long = arrivals.get()
+    fun arrivalBoundary(): Long = synchronized(arrivalLock) { arrivals }
 
     /**
-     * Событие SDK (поток SDK, не блокирует). Номер поступления присваивается здесь, до очереди.
-     * После [close] — отбрасывается, как и ещё не начатые.
+     * Событие SDK (поток SDK, не блокирует). Номер и монотонное время поступления ([System.nanoTime])
+     * фиксируются здесь, до очереди: задержка очереди не влияет ни на время, ни на принадлежность
+     * события. После [close] — отбрасывается, как и ещё не начатые.
      */
     fun post(event: Int) {
         if (closing.get()) return
-        val seq = arrivals.incrementAndGet()
-        try {
-            executor.execute { if (!closing.get()) onEvent(device, event, seq) }
-        } catch (_: RejectedExecutionException) {
+        val arrivedNs = System.nanoTime()
+        synchronized(arrivalLock) {
+            val seq = ++arrivals
+            try {
+                executor.execute { if (!closing.get()) onEvent(device, event, seq, arrivedNs) }
+            } catch (_: RejectedExecutionException) {
+            }
         }
     }
 
@@ -143,7 +151,7 @@ internal class CameraConnection private constructor(
         suspend fun open(
             device: ToupcamDevice,
             timeoutMs: Long,
-            onEvent: (ToupcamDevice, Int, Long) -> Unit,
+            onEvent: (ToupcamDevice, Int, Long, Long) -> Unit,
         ): CameraConnection {
             // Разрешение, полученное до неуспешного выхода, обязательно возвращается. Отмена или
             // таймаут могут сработать уже ПОСЛЕ acquire(), на выходе из withTimeout (граница

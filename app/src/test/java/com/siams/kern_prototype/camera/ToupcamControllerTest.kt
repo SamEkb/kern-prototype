@@ -587,6 +587,143 @@ class ToupcamControllerTest {
         assertEquals("0x80004001", awb.hr)
     }
 
+    /** 5k: итог AE — вызовы, значения профиля, состояние SDK после, события за время процедуры. */
+    @Test
+    fun autoExposureSummaryCollectsCallsResultReadbackAndEvents() = runBlocking {
+        rig.aeEvents = listOf(0x0001, 0x000d)            // EXPOSURE, AUTOEXPO_CONV
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        val s = c.lastAutoSummary!!
+        assertEquals("Автоэкспозиция", s.procedure)
+        assertEquals("завершена", s.outcome)
+        assertEquals(listOf("MaxAutoExpoTimeAGain", "AutoExpoEnable", "AutoExpoEnable"), s.calls.map { it.op })
+        assertEquals(1000L, s.result!!.exposureUs)
+        assertEquals(100, s.result!!.gainPercent)
+        assertTrue("состояние SDK прочитано после процедуры", s.readbackAfter != null)
+        assertEquals(setOf("EXPOSURE", "AUTOEXPO_CONV"), s.events.map { it.name }.toSet())
+        // Чтение состояния — после всех рабочих вызовов процедуры (их порядок не меняется).
+        val log = rig.snapshot()
+        assertTrue(log.toString(), log.lastIndexOf("readState1") > log.lastIndexOf("ae01"))
+        assertTrue(s.describe(), s.describe().contains("AUTOEXPO_CONV@"))
+    }
+
+    @Test
+    fun autoWhiteBalanceSummaryHasWbEventsAndValues() = runBlocking {
+        rig.awbEvents = listOf(0x0006)                   // WBGAIN
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        val s = c.lastAutoSummary!!
+        assertEquals("Автобаланс белого", s.procedure)
+        assertEquals(listOf("AwbInit"), s.calls.map { it.op })
+        assertEquals(1f, s.result!!.wbRed, 0f)           // getWhiteBalanceGain = 0 → множитель 1
+        assertEquals(listOf("WBGAIN"), s.events.map { it.name })
+    }
+
+    /** Отмена процедуры: итог «отменена», ручной режим возвращён, состояние SDK всё равно прочитано. */
+    @Test
+    fun cancelledProcedureIsSummarizedAsCancelled() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val ae = async(Dispatchers.IO) { c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        while (!rig.has("ae11")) kotlinx.coroutines.delay(5)
+        ae.cancel()
+        runCatching { ae.await() }
+        val s = c.lastAutoSummary!!
+        assertEquals("отменена", s.outcome)
+        assertEquals(null, s.result)
+        assertTrue(s.readbackAfter != null)
+    }
+
+    /** Сбой чтения после процедуры — «неизвестно», а не ноль; процедура не ломается. */
+    @Test
+    fun unreadableStateAfterProcedureIsUnknown() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.failReadState = true
+        c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        val s = c.lastAutoSummary!!
+        assertEquals("завершена", s.outcome)
+        assertEquals(null, s.readbackAfter)
+        assertTrue(s.describe().contains("состояние SDK после: неизвестно"))
+    }
+
+    /** Задержать очередь подключения до [gate]; вернуться, когда блокировка началась. */
+    private fun blockQueue(c: ToupcamController, gate: CountDownLatch) {
+        val started = CountDownLatch(1)
+        kotlin.concurrent.thread {
+            runBlocking { c.runOnConnectionForTest { started.countDown(); gate.await(5, java.util.concurrent.TimeUnit.SECONDS) } }
+        }
+        assertTrue(started.await(3, java.util.concurrent.TimeUnit.SECONDS))
+    }
+
+    /** Событие поступило ДО начала AE, обработано во время неё (очередь была занята) — не её событие. */
+    @Test
+    fun eventArrivedBeforeProcedureIsNotInItsSummary() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val gate = CountDownLatch(1)
+        blockQueue(c, gate)
+        rig.devices.last().listener?.invoke(0x0082)        // NOFRAMETIMEOUT — до процедуры
+        val ae = async(Dispatchers.IO) { c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        Thread.sleep(200)                                  // AE зафиксировала начало и ждёт очередь
+        gate.countDown()
+        ae.await()
+        val s = c.lastAutoSummary!!
+        assertTrue(s.events.toString(), s.events.none { it.name == "NOFRAMETIMEOUT" })
+    }
+
+    /** Событие поступило в последнем рабочем вызове, обработано после него — оно в итоге процедуры. */
+    @Test
+    fun eventArrivedInLastCallIsInSummaryEvenIfProcessedLater() = runBlocking {
+        rig.aeOffEvents = listOf(0x000d)                   // AUTOEXPO_CONV внутри выключения авто-AE
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        // Обработка события медленная: итог должен дождаться её (барьер очереди), а не собраться раньше.
+        c.beforeEventRecordedForTest = { code -> if (code == 0x000d) Thread.sleep(300) }
+        c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        assertTrue(c.lastAutoSummary!!.events.toString(), c.lastAutoSummary!!.events.any { it.name == "AUTOEXPO_CONV" })
+    }
+
+    /** Очередь задержана: отметка времени — поступление события, а не его обработка. */
+    @Test
+    fun eventTimestampIsArrivalNotProcessing() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val launched = System.nanoTime()
+        val ae = async(Dispatchers.IO) { c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        while (!rig.has("ae11")) kotlinx.coroutines.delay(5)   // AE включена, идёт ожидание сходимости
+        val gate = CountDownLatch(1)
+        blockQueue(c, gate)
+        val emitted = System.nanoTime()
+        rig.devices.last().listener?.invoke(0x000d)
+        Thread.sleep(500)
+        val released = System.nanoTime()
+        gate.countDown()
+        ae.await()
+        val ev = c.lastAutoSummary!!.events.single { it.name == "AUTOEXPO_CONV" }
+        val emittedMs = (emitted - launched) / 1_000_000
+        val releasedMs = (released - launched) / 1_000_000
+        assertTrue("отметка ${ev.atMs} мс — не позже поступления ($emittedMs мс)", ev.atMs <= emittedMs + 20)
+        assertTrue("и заметно раньше обработки ($releasedMs мс)", ev.atMs < releasedMs - 300)
+    }
+
+    /** Вне процедур событие пишется в журнал один раз за подключение; во время процедуры — в итог. */
+    @Test
+    fun eventsOutsideProceduresAreLoggedOncePerConnection() = runBlocking {
+        org.robolectric.shadows.ShadowLog.clear()
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val dev = rig.devices.last()
+        repeat(3) { dev.listener?.invoke(0x0082) }        // NOFRAMETIMEOUT
+        val end = System.currentTimeMillis() + 2_000
+        fun logged() = org.robolectric.shadows.ShadowLog.getLogsForTag("ToupcamController").count { it.msg.contains("Событие SDK NOFRAMETIMEOUT") }
+        while (logged() < 1 && System.currentTimeMillis() < end) Thread.sleep(10)
+        Thread.sleep(100)
+        assertEquals(1, logged())
+    }
+
     @Test
     fun acceptedAutoCallsAreRecordedAsOk() = runBlocking {
         val c = controller()

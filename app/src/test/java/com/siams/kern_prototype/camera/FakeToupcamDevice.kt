@@ -27,6 +27,11 @@ internal class FakeCameraRig {
     @Volatile var pullImageGate: CountDownLatch? = null         // медленная отрисовка превью
     /** readState() бросает (SDK не отвечает) / диапазоны SDK заданы тестом. */
     @Volatile var failReadState = false
+    /** 5k: события SDK, которые камера шлёт после включения авто-AE / запуска AWB (поток SDK). */
+    @Volatile var aeEvents: List<Int> = emptyList()
+    @Volatile var awbEvents: List<Int> = emptyList()
+    /** События, которые камера шлёт синхронно внутри последнего рабочего вызова AE (выключение авто). */
+    @Volatile var aeOffEvents: List<Int> = emptyList()
     @Volatile var expoRange = intArrayOf(0, 100, 15_000_000, 8_000)   // [hr, min, max, def]
     @Volatile var gainRange = intArrayOf(0, 100, 5000, 100)
     /** SDK не смог сообщить размер кадра превью / снимка. */
@@ -148,7 +153,12 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
     @Volatile private var gammaVal = 0
     @Volatile private var wb = intArrayOf(0, 0, 0)
 
-    override fun setAutoExpoEnable(mode: Int) = handle("setAutoExpoEnable") { rig.log += "ae$mode$id"; hr("AutoExpoEnable") }
+    override fun setAutoExpoEnable(mode: Int) = handle("setAutoExpoEnable") {
+        rig.log += "ae$mode$id"
+        if (mode == 1) rig.aeEvents.forEach { e -> thread { listener?.invoke(e) } }
+        if (mode == 0) rig.aeOffEvents.forEach { e -> listener?.invoke(e) }
+        hr("AutoExpoEnable")
+    }
     override fun setExpoTime(microseconds: Int) = handle("setExpoTime") {
         rig.log += "expo$id=$microseconds"
         rig.log += "setExpoStart$id"
@@ -165,9 +175,13 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
     override fun setMaxAutoExpoTimeAGain(maxTimeUs: Int, maxGainPercent: Int) = handle("setMaxAe") { hr("MaxAutoExpoTimeAGain") }
     override fun getExpoTime() = handle("getExpoTime") { 1000 }
     override fun getExpoAGain() = handle("getExpoAGain") { 100 }
-    override fun awbOnce() = handle("awbOnce") { hr("AwbInit") }
+    override fun awbOnce() = handle("awbOnce") {
+        rig.awbEvents.forEach { e -> thread { listener?.invoke(e) } }
+        hr("AwbInit")
+    }
     override fun getWhiteBalanceGain() = handle("getWb") { intArrayOf(0, 0, 0) }
     override fun readState(): IntArray = handle("readState") {
+        rig.log += "readState$id"
         if (rig.failReadState) error("SDK не ответил")
         val wbHr = if ("WhiteBalanceGain" in rig.rejectSetters) E_NOTIMPL else 0
         val e = rig.expoRange

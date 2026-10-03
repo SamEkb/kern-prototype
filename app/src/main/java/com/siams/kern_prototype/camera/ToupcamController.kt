@@ -169,8 +169,8 @@ class ToupcamController internal constructor(
      */
     private suspend fun connect(profile: CameraProfile) {
         var generation = 0L
-        val conn = CameraConnection.open(deviceFactory(), shutdownWaitMs) { dev, event, seq ->
-            onSdkEvent(dev, event, generation, seq)
+        val conn = CameraConnection.open(deviceFactory(), shutdownWaitMs) { dev, event, seq, arrivedNs ->
+            onSdkEvent(dev, event, generation, seq, arrivedNs)
         }
         generation = stillGate.startConnection() // события начнутся только после open() устройства
         connection = conn
@@ -292,6 +292,57 @@ class ToupcamController internal constructor(
     internal var lastAutoCalls: List<SdkCall> = emptyList()
         private set
 
+    /** Точка для тестов: выполнить [block] в очереди подключения (задержать очередь). В приложении не используется. */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun <T> runOnConnectionForTest(block: (ToupcamDevice) -> T): T =
+        (connection ?: error("нет подключения")).run(block)
+
+    /** Точка для тестов: перед записью события в буфер (медленная обработка). В приложении null. */
+    @androidx.annotation.VisibleForTesting
+    @Volatile
+    internal var beforeEventRecordedForTest: ((Int) -> Unit)? = null
+
+    /** 5k: итог последней авто-процедуры (AE/AWB) — диагностика WB/AE. */
+    @Volatile
+    internal var lastAutoSummary: AutoProcedureSummary? = null
+
+    /** 5k: событие SDK (кроме кадров) с номером и монотонным временем ПОСТУПЛЕНИЯ ([CameraConnection.post]). */
+    private class ArrivedEvent(val generation: Long, val seq: Long, val code: Int, val arrivedNs: Long)
+
+    /** 5k: последние события SDK — кольцевой буфер; итог процедуры выбирает их по номерам поступления. */
+    private val recentEvents = ArrayDeque<ArrivedEvent>()
+
+    /** 5k: коды событий, уже записанные в журнал (первое появление за подключение). */
+    private val loggedEvents: MutableSet<Pair<Long, Int>> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * 5k: событие SDK, кроме кадров превью/снимка: в буфер (для итогов процедур) и в журнал при
+     * первом появлении кода за подключение (частые события не засоряют журнал).
+     */
+    private fun noteEvent(event: Int, generation: Long, seq: Long, arrivedNs: Long) {
+        beforeEventRecordedForTest?.invoke(event)
+        synchronized(recentEvents) {
+            recentEvents.addLast(ArrivedEvent(generation, seq, event, arrivedNs))
+            while (recentEvents.size > EVENT_BUFFER) recentEvents.removeFirst()
+        }
+        if (loggedEvents.add(generation to event)) {
+            runCatching { Log.i(TAG, "Событие SDK ${SdkEvents.name(event)} (0x%04x) — первое за подключение".format(event)) }
+        }
+    }
+
+    /**
+     * События подключения поколения [generation] с номерами поступления в (startSeq, endSeq] —
+     * и признак, что часть окна уже вытеснена из буфера.
+     */
+    private fun eventsBetween(generation: Long, startSeq: Long, endSeq: Long, startNs: Long): Pair<List<SdkEventRecord>, Boolean> =
+        synchronized(recentEvents) {
+            val ofConnection = recentEvents.filter { it.generation == generation }
+            val inWindow = ofConnection.filter { it.seq in (startSeq + 1)..endSeq }
+            val oldest = ofConnection.firstOrNull()?.seq
+            val truncated = recentEvents.size >= EVENT_BUFFER && oldest != null && oldest > startSeq + 1
+            inWindow.map { SdkEventRecord(it.code, SdkEvents.name(it.code), (it.arrivedNs - startNs) / 1_000_000) } to truncated
+        }
+
     /** Записать вызов SDK авто-процедуры; поведение не меняется (отказ только фиксируется). */
     private fun sdk(calls: MutableList<SdkCall>, op: String, args: String, hr: Int) {
         val call = SdkCall(op, args, hr)
@@ -374,9 +425,7 @@ class ToupcamController internal constructor(
      */
     override suspend fun autoExposure(current: CameraProfile): CameraProfile = opLock.withLock {
         val conn = connection ?: return@withLock current
-        var done = false
-        val calls = java.util.Collections.synchronizedList(mutableListOf<SdkCall>())
-        try {
+        autoProcedure("Автоэкспозиция", conn, current) { calls ->
             // Вызовы SDK и их порядок — прежние; каждый шаг — в очереди подключения.
             applied = null                     // авто-режим: параметры камеры меняются сами
             conn.run { cam ->
@@ -394,14 +443,8 @@ class ToupcamController internal constructor(
                     iso = gainPct,
                 ).also { applyAndReport(cam, it) }
             }
-            done = true
             currentProfile = updated
             updated
-        } finally {
-            lastAutoCalls = calls.toList()
-            // R13: отмена/ошибка посреди AE не оставляет камеру в авто-режиме — возвращаем ручной
-            // режим с прежним профилем (applier выключает авто-AE).
-            if (!done) restoreManual(conn, current)
         }
     }
 
@@ -412,9 +455,7 @@ class ToupcamController internal constructor(
      */
     override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile = opLock.withLock {
         val conn = connection ?: return@withLock current
-        var done = false
-        val calls = java.util.Collections.synchronizedList(mutableListOf<SdkCall>())
-        try {
+        autoProcedure("Автобаланс белого", conn, current) { calls ->
             applied = null                     // one-push AWB меняет баланс белого сам
             conn.run { sdk(calls, "AwbInit", "one-push", it.awbOnce()) }
             delay(AWB_SETTLE_MS)
@@ -429,12 +470,68 @@ class ToupcamController internal constructor(
                     wbBlueGain = blue,
                 ).also { applyAndReport(cam, it) }
             }
-            done = true
             currentProfile = updated
             updated
+        }
+    }
+
+    /**
+     * Обвязка авто-процедуры (AE/AWB): вызовы [body] не меняются. R13: прерванная процедура
+     * (ошибка/отмена) возвращает ручной режим с прежним профилем. 5k: события SDK за время процедуры
+     * собираются, ПОСЛЕ неё (и после возврата ручного режима) читается состояние SDK, итог —
+     * [lastAutoSummary] и одна строка журнала.
+     */
+    private suspend fun autoProcedure(
+        name: String,
+        conn: CameraConnection,
+        current: CameraProfile,
+        body: suspend (MutableList<SdkCall>) -> CameraProfile,
+    ): CameraProfile {
+        val calls = java.util.Collections.synchronizedList(mutableListOf<SdkCall>())
+        // Начало окна: время, затем граница поступлений — событие между ними попадёт в окно
+        // с неотрицательной отметкой. Принадлежность — по номеру ПОСТУПЛЕНИЯ, не обработки.
+        val startNs = System.nanoTime()
+        val generation = stillGate.currentGeneration()
+        val startSeq = conn.arrivalBoundary()
+        var result: CameraProfile? = null
+        var outcome = "ошибка"
+        try {
+            return body(calls).also { result = it; outcome = "завершена" }
+        } catch (e: CancellationException) {
+            outcome = "отменена"
+            throw e
+        } catch (t: Throwable) {
+            outcome = "ошибка: ${t.message ?: t.javaClass.simpleName}"
+            throw t
         } finally {
             lastAutoCalls = calls.toList()
-            if (!done) restoreManual(conn, current)
+            if (result == null) restoreManual(conn, current)
+            // Конец окна — после последнего рабочего вызова (и возврата ручного режима). Чтение
+            // состояния идёт той же очередью ПОСЛЕ фиксации границы, поэтому к его завершению все
+            // события окна уже обработаны (в буфере).
+            val endSeq = conn.arrivalBoundary()
+            val after = withContext(NonCancellable) { readback(conn) }
+            val (events, truncated) = eventsBetween(generation, startSeq, endSeq, startNs)
+            val summary = AutoProcedureSummary(
+                procedure = name,
+                outcome = outcome,
+                durationMs = (System.nanoTime() - startNs) / 1_000_000,
+                calls = calls.toList(),
+                result = result?.let {
+                    AutoProcedureSummary.Result(
+                        exposureUs = it.exposureTimeNs / 1_000L,
+                        gainPercent = it.iso,
+                        wbRed = it.wbRedGain,
+                        wbGreen = (it.wbGreenEvenGain + it.wbGreenOddGain) / 2f,
+                        wbBlue = it.wbBlueGain,
+                    )
+                },
+                readbackAfter = after,
+                events = events,
+                eventsTruncated = truncated,
+            )
+            lastAutoSummary = summary
+            runCatching { Log.i(TAG, summary.describe()) }
         }
     }
 
@@ -689,12 +786,13 @@ class ToupcamController internal constructor(
 
     // ---- События SDK (очередь CameraConnection подключения) ---------------------
 
-    private fun onSdkEvent(dev: ToupcamDevice, event: Int, generation: Long, seq: Long) {
+    private fun onSdkEvent(dev: ToupcamDevice, event: Int, generation: Long, seq: Long, arrivedNs: Long) {
         // Событие прежнего подключения — не относится к текущей камере.
         if (generation != stillGate.currentGeneration()) {
             Log.w(TAG, "Событие 0x${Integer.toHexString(event)} прежнего подключения — проигнорировано")
             return
         }
+        if (event != EVENT_IMAGE && event != EVENT_STILLIMAGE) noteEvent(event, generation, seq, arrivedNs)
         when (event) {
             EVENT_IMAGE -> {
                 frameEvents++
@@ -833,6 +931,9 @@ class ToupcamController internal constructor(
         internal const val EVENT_DISCONNECTED = 0x0081
 
         internal const val SNAP_TIMEOUT_MS = 15_000L
+
+        /** 5k: сколько последних событий SDK (кроме кадров) хранить для итогов процедур. */
+        private const val EVENT_BUFFER = 2048
 
         // R10: после смены параметров перед снимком ждём кадры превью (проверить на камере).
         private const val SETTLE_FRAMES = 2
