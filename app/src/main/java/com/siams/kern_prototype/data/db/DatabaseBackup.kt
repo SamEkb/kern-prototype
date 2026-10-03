@@ -3,7 +3,9 @@ package com.siams.kern_prototype.data.db
 import android.content.Context
 import android.util.Log
 import java.io.File
-import java.io.RandomAccessFile
+import android.database.DatabaseErrorHandler
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 
 /**
  * Защита архива при обновлении схемы (R07). Вызывается ДО открытия Room.
@@ -56,15 +58,40 @@ object DatabaseBackup {
     }
 
     /**
-     * `PRAGMA user_version` из заголовка файла SQLite (смещение 60, big-endian), без
-     * открытия БД — чтобы не держать блокировок до Room. Если свежая версия ещё в `-wal`,
-     * заголовок покажет прежнюю — будет лишняя копия, что безопасно. Ошибка чтения
-     * пробрасывается: открывать непрочитанный файл вслепую нельзя.
+     * Версия схемы (`PRAGMA user_version`) — через SQLite, а не из заголовка файла: в режиме WAL
+     * (у Room по умолчанию) после аварийного завершения актуальный заголовок может быть только в
+     * `-wal`, а основной файл — устаревшим (вплоть до 0). Соединение только для чтения не
+     * выполняет контрольную точку и не меняет режим журнала — файлы для копии не изменяются.
+     *
+     * Повреждённый файл НЕ удаляется: стандартный обработчик Android ([android.database.DefaultDatabaseErrorHandler])
+     * удаляет файлы БД прямо внутри открытия (до любого catch и до копии), поэтому передаётся
+     * [KeepFilesOnCorruption] — он останавливает открытие исключением. Обновление прекращается,
+     * файлы остаются побайтно прежними; повторная попытка снова останавливается, пустая БД не создаётся.
      */
-    private fun readUserVersion(db: File): Int =
-        RandomAccessFile(db, "r").use { f ->
-            if (f.length() < 64) return 0
-            f.seek(60)
-            f.readInt()
+    private fun readUserVersion(db: File): Int {
+        if (db.length() == 0L) return 0
+        return try {
+            SQLiteDatabase.openDatabase(db.path, null, SQLiteDatabase.OPEN_READONLY, KeepFilesOnCorruption).use { it.version }
+        } catch (e: SQLiteException) {
+            throw corrupted(e)
+        } catch (e: CorruptDatabaseException) {
+            throw corrupted(e)
         }
+    }
+
+    private fun corrupted(cause: Throwable) = IllegalStateException(
+        "Файл базы данных повреждён или не читается — обновление остановлено, данные не изменены. " +
+            "Не удаляйте приложение: файл можно восстановить или передать для анализа.",
+        cause,
+    )
+
+    private class CorruptDatabaseException(path: String) : RuntimeException("Повреждение БД: $path")
+
+    /** Обработчик повреждения, который ничего не удаляет и прерывает открытие. */
+    private object KeepFilesOnCorruption : DatabaseErrorHandler {
+        override fun onCorruption(dbObj: SQLiteDatabase) {
+            runCatching { Log.e(TAG, "Обнаружено повреждение БД ${dbObj.path} — файлы не удаляются") }
+            throw CorruptDatabaseException(dbObj.path)
+        }
+    }
 }

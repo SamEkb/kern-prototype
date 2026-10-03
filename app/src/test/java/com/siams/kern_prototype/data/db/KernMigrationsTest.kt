@@ -236,6 +236,66 @@ class KernMigrationsTest {
         assertTrue(File(context.filesDir, "db_backup").list().orEmpty().any { it.contains("-v2-") })
     }
 
+    /**
+     * R07: состояние после аварийного завершения в режиме WAL — данные и версия только в `-wal`,
+     * заголовок основного файла устарел. Версия всё равно распознаётся: копия снимается,
+     * неподдерживаемое обновление останавливается.
+     */
+    @Test
+    fun versionOnlyInWal_isStillDetected() {
+        val target = context.getDatabasePath(KernDatabase.NAME).apply { parentFile?.mkdirs(); delete() }
+        listOf("-wal", "-shm").forEach { File(target.path + it).delete() }
+        val src = File(context.cacheDir, "crash-src-${System.nanoTime()}.db")
+        val open = SQLiteDatabase.openOrCreateDatabase(src, null)
+        try {
+            open.enableWriteAheadLogging()
+            open.execSQL("CREATE TABLE drilling (id TEXT PRIMARY KEY, title TEXT)")
+            open.execSQL("INSERT INTO drilling VALUES ('old', 'Старое долбление')")
+            open.version = 2
+            // «Сбой»: файлы копируются, пока БД открыта (контрольной точки не было).
+            for (suffix in listOf("", "-wal", "-shm")) {
+                val f = File(src.path + suffix)
+                if (f.exists()) f.copyTo(File(target.path + suffix), overwrite = true)
+            }
+        } finally {
+            open.close()
+        }
+        val header = java.io.RandomAccessFile(target, "r").use { f -> if (f.length() < 64) 0 else { f.seek(60); f.readInt() } }
+        assertTrue("предусловие: заголовок основного файла устарел (было $header)", header != 2)
+        assertTrue("предусловие: данные в WAL", File(target.path + "-wal").length() > 0)
+
+        try {
+            DatabaseModule.provideDatabase(context).openHelper.writableDatabase
+            fail("обновление v2 должно быть остановлено")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!, e.message!!.contains("версии 2"))
+        }
+        assertTrue(File(context.filesDir, "db_backup").listFiles().orEmpty().any { it.name.contains("-v2-") && it.name.endsWith("-wal") })
+    }
+
+    /**
+     * R07: повреждённый файл БД — понятная ошибка, файлы не удаляются и не меняются (стандартный
+     * обработчик Android удалил бы их внутри открытия); повторная попытка не создаёт пустую БД.
+     */
+    @Test
+    fun corruptedDatabase_isKeptByteForByte() {
+        val target = context.getDatabasePath(KernDatabase.NAME).apply { parentFile?.mkdirs(); delete() }
+        listOf("-wal", "-shm", "-journal").forEach { File(target.path + it).delete() }
+        val garbage = ByteArray(8192) { i -> ((i * 31 + 7) % 251).toByte() }
+        target.writeBytes(garbage)
+
+        repeat(2) { attempt ->
+            try {
+                DatabaseModule.provideDatabase(context).openHelper.writableDatabase
+                fail("попытка ${attempt + 1}: повреждённая БД не должна открываться")
+            } catch (e: IllegalStateException) {
+                assertTrue(e.message!!, e.message!!.contains("повреждён"))
+            }
+            assertTrue("попытка ${attempt + 1}: файл не удалён", target.exists())
+            assertTrue("попытка ${attempt + 1}: файл не изменён", target.readBytes().contentEquals(garbage))
+        }
+    }
+
     @Test
     fun backupFailure_stopsUpgrade() {
         createFromSchema(KernDatabase.NAME, 3) {}
