@@ -43,6 +43,7 @@ import com.siams.kern_prototype.ui.theme.Body3Bold
 import com.siams.kern_prototype.ui.theme.Body4
 import com.siams.kern_prototype.ui.theme.Gray40
 import com.siams.kern_prototype.ui.theme.Green30
+import com.siams.kern_prototype.ui.components.readableWidth
 import com.siams.kern_prototype.ui.theme.KernTokens
 import com.siams.kern_prototype.ui.theme.Red30
 import com.siams.kern_prototype.viewmodel.SettingsViewModel
@@ -98,7 +99,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .padding(padding)
                 .padding(KernTokens.spaceLg)
-                .fillMaxWidth()
+                .readableWidth()
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
         ) {

@@ -39,6 +39,7 @@ import com.siams.kern_prototype.ui.components.StatusBadge
 import com.siams.kern_prototype.ui.theme.Body2Bold
 import com.siams.kern_prototype.ui.theme.Body3
 import com.siams.kern_prototype.ui.theme.Gray40
+import com.siams.kern_prototype.ui.components.readableWidth
 import com.siams.kern_prototype.ui.theme.KernTokens
 import com.siams.kern_prototype.ui.theme.Red30
 import com.siams.kern_prototype.viewmodel.DrillingListViewModel
@@ -87,7 +88,7 @@ fun SendQueueScreen(
             )
         },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
+        Column(Modifier.fillMaxSize().padding(padding).readableWidth()) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(KernTokens.spaceLg),
                 horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),

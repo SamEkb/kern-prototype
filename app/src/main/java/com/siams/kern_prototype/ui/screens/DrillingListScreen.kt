@@ -46,6 +46,7 @@ import com.siams.kern_prototype.ui.components.StatusBadge
 import com.siams.kern_prototype.ui.theme.Body2Bold
 import com.siams.kern_prototype.ui.theme.Body3
 import com.siams.kern_prototype.ui.theme.Gray40
+import com.siams.kern_prototype.ui.components.readableWidth
 import com.siams.kern_prototype.ui.theme.KernTokens
 import com.siams.kern_prototype.ui.theme.Red30
 import com.siams.kern_prototype.viewmodel.DrillingListViewModel
@@ -117,7 +118,7 @@ fun DrillingListScreen(
             }
         } else {
             LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
+                modifier = Modifier.fillMaxSize().padding(padding).readableWidth(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(KernTokens.spaceLg),
                 verticalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
             ) {

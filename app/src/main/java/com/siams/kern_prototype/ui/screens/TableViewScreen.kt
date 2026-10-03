@@ -52,6 +52,7 @@ import com.siams.kern_prototype.ui.theme.Gray40
 import com.siams.kern_prototype.ui.theme.Orange30
 import com.siams.kern_prototype.ui.theme.Ink
 import com.siams.kern_prototype.ui.theme.KernTheme
+import com.siams.kern_prototype.ui.components.AdaptiveSplit
 import com.siams.kern_prototype.ui.theme.KernTokens
 import com.siams.kern_prototype.ui.theme.Red30
 import com.siams.kern_prototype.ui.theme.UvYellow
@@ -114,19 +115,14 @@ fun TableViewScreen(
             )
         },
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(KernTokens.spaceLg),
-            verticalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
-        ) {
+        // FIXES §8: в широком окне — изображение слева, слои и глубины справа; иначе одна колонка.
+        AdaptiveSplit(
+            sideWidth = KernTokens.sidePanelWideWidth,
+            mainAspect = 4f / 3f,
+            modifier = Modifier.padding(padding),
             // Наложение слоёв: Дневной снизу, УФ сверху с alpha = overlay (§5.5).
-            Box(
-                Modifier.fillMaxWidth().aspectRatio(4f / 3f).background(Color.Black),
-                contentAlignment = Alignment.Center,
-            ) {
+            main = { m ->
+                Box(m.background(Color.Black), contentAlignment = Alignment.Center) {
                 if (daylight != null) {
                     AsyncImage(
                         model = File(daylight.filePath),
@@ -146,7 +142,9 @@ fun TableViewScreen(
                 if (daylight == null && uf == null) {
                     Text(stringResource(R.string.table_view_no_images), color = Color.White, style = Body3)
                 }
-            }
+                }
+            },
+            side = {
 
             if (daylight != null && uf != null) {
                 Text(stringResource(R.string.table_view_overlay), style = Body3, color = Color.White)
@@ -180,7 +178,8 @@ fun TableViewScreen(
                 onApplyToAll = vm::applyDepthToAllLayers,
                 onDiscard = vm::discardDepthDraft,
             )
-        }
+            },
+        )
     }
 
     if (showEditNumber && t != null) {

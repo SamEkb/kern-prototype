@@ -34,6 +34,15 @@ object KernTokens {
     /** Боковая панель редактора профилей (ползунки, автонастройка) — шире (FIXES §8). */
     val sidePanelWideWidth: Dp = 360.dp
 
+    /** Предельная ширина содержимого списков и форм на широком экране (FIXES §8). */
+    val contentMaxWidth: Dp = 640.dp
+
+    /**
+     * Минимальная ширина карточки стола в сетке (FIXES §8). Две колонки на телефоне шириной от 320 dp:
+     * 320 − 2×16 (поля) = 288 ≥ 2×136 + 12 (промежуток).
+     */
+    val tableCardMinWidth: Dp = 136.dp
+
     /** Цвета статуса отправки долбления (§14.5, бейдж). */
     data class StatusColors(val content: Color, val container: Color)
 

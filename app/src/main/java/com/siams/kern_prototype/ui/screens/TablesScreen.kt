@@ -4,13 +4,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -43,6 +40,7 @@ import com.siams.kern_prototype.ui.theme.Body3Bold
 import com.siams.kern_prototype.ui.theme.Body4Bold
 import com.siams.kern_prototype.ui.theme.Gray40
 import com.siams.kern_prototype.ui.theme.Ink
+import com.siams.kern_prototype.ui.components.TablesGrid
 import com.siams.kern_prototype.ui.theme.KernTokens
 import com.siams.kern_prototype.ui.theme.UvYellow
 import com.siams.kern_prototype.viewmodel.TablesViewModel
@@ -98,13 +96,8 @@ fun TablesScreen(
                 Text(stringResource(R.string.tables_empty), color = Gray40, style = Body3Bold)
             }
         } else {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(KernTokens.spaceLg),
-                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(KernTokens.spaceMd),
-                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(KernTokens.spaceMd),
-            ) {
+            // FIXES §8: на телефоне — 2 колонки, на планшете/в альбомной ориентации — больше.
+            TablesGrid(modifier = Modifier.fillMaxSize().padding(padding)) {
                 items(tables, key = { it.table.id }) { item ->
                     TableCard(item = item, onClick = { onOpenTable(item.table.id) })
                 }

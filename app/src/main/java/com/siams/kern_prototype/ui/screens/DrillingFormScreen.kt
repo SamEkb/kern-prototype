@@ -36,6 +36,7 @@ import com.siams.kern_prototype.R
 import com.siams.kern_prototype.domain.model.PassportFieldType
 import com.siams.kern_prototype.ui.theme.Body3
 import com.siams.kern_prototype.ui.theme.Gray40
+import com.siams.kern_prototype.ui.components.readableWidth
 import com.siams.kern_prototype.ui.theme.KernTokens
 import com.siams.kern_prototype.viewmodel.DrillingFormViewModel
 
@@ -84,7 +85,7 @@ fun DrillingFormScreen(
             modifier = Modifier
                 .padding(padding)
                 .padding(KernTokens.spaceLg)
-                .fillMaxWidth()
+                .readableWidth()
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(KernTokens.spaceMd),
         ) {
