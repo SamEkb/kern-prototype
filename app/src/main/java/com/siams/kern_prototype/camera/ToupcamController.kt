@@ -71,7 +71,7 @@ class ToupcamController internal constructor(
     ) : this(context, profileStore, { CamLibDevice(context) }, SNAP_TIMEOUT_MS, SHUTDOWN_WAIT_MS)
 
     /** FIXES §3: фокус у Touptek механический — профиль его не применяет ([ToupcamProfileApplier]). */
-    override val capabilities: CameraCapabilities = CameraCapabilities(supportsFocus = false)
+    override val capabilities: CameraCapabilities = CameraCapabilities(supportsFocus = false, terms = ParameterTerms.TOUPTEK)
 
     private val _state = MutableStateFlow<CameraControllerState>(CameraControllerState.Idle)
     override val state: StateFlow<CameraControllerState> = _state.asStateFlow()

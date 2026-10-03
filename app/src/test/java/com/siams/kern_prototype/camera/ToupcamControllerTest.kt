@@ -86,6 +86,7 @@ class ToupcamControllerTest {
     @Test
     fun touptekDoesNotSupportFocus() {
         assertFalse(controller().capabilities.supportsFocus)
+        assertEquals("P3: обозначения Touptek", ParameterTerms.TOUPTEK, controller().capabilities.terms)
     }
 
     @Test

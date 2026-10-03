@@ -7,4 +7,12 @@ package com.siams.kern_prototype.camera
 data class CameraCapabilities(
     /** Камера применяет [com.siams.kern_prototype.domain.model.CameraProfile.focusDistance]. */
     val supportsFocus: Boolean = false,
+    /** Обозначения параметров профиля в интерфейсе (P3). */
+    val terms: ParameterTerms = ParameterTerms.CAMERA2,
 )
+
+/**
+ * Обозначения параметров профиля: Touptek — выдержка в мс, усиление в %, гамма;
+ * Camera2 — выдержка 1/x с, ISO.
+ */
+enum class ParameterTerms { TOUPTEK, CAMERA2 }

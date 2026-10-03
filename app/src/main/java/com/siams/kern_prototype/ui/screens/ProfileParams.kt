@@ -56,6 +56,10 @@ internal data class ParamSpec(
  * R14: выдержка, усиление и гамма — в границах ТЕКУЩЕЙ камеры (тех же, что при применении профиля);
  * источник границ (SDK или запасной) показывается в подсказке.
  */
+/** Выдержка в единицах Touptek: до секунды — в мс, от секунды — в секундах (редактор и HUD). */
+internal fun formatExposureMs(ms: Float, locale: java.util.Locale = java.util.Locale.getDefault()): String =
+    if (ms >= 1000f) String.format(locale, "%.2f с", ms / 1000f) else String.format(locale, "%.2f мс", ms)
+
 internal fun profileParams(
     limits: CameraLimits,
     capabilities: CameraCapabilities = CameraCapabilities(),
@@ -69,7 +73,7 @@ internal fun profileParams(
             "Выдержка", e.min / 1000f, e.max / 1000f,
             get = { it.exposureTimeNs / 1_000_000f },
             set = { p, v -> p.copy(exposureTimeNs = (v * 1_000_000).toLong()) },
-            format = { if (it >= 1000f) "%.2f с".format(it / 1000f) else "%.2f мс".format(it) },
+            format = { formatExposureMs(it) },
             log = true, clampedLikeController = true, note = source(e),
         ),
         ParamSpec(

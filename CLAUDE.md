@@ -136,7 +136,12 @@ DataStore · Retrofit/OkHttp (kotlinx.serialization) · WorkManager · Hilt · C
   `ndkVersion=28.2.13676358`, `abiFilters=arm64-v8a,armeabi-v7a`. Собрано и упаковано:
   APK содержит `libtoupcam.so`+`libjnicam.so` под обе ABI.
 - **Дизайн §14**: иконки → Material Symbols Outlined; строки вынесены в `strings.xml`
-  (RU). БД: version=5, явные миграции (`KernMigrations`, схемы в `app/schemas`, тесты `KernMigrationsTest`), копия БД перед обновлением (`DatabaseBackup`); разрушительного fallback нет (v1–v2 и сбой копии останавливают обновление).
+  (RU). БД: **version=7**, явные миграции (`KernMigrations`, схемы `app/schemas/…/3–7.json`,
+  тесты `KernMigrationsTest`): 3→4 `layer.metaConfirmed`/`staleRemoteImageId`, `drilling.editRevision`;
+  4→5 `drilling.remoteDestination`, `layer.fileSha256`; 5→6 `layer.captureAuditJson` (аудит снимка);
+  6→7 таблица `form_draft` (черновики паспорта и глубин). Перед обновлением — копия БД
+  (`DatabaseBackup`; версия читается через SQLite с учётом WAL, повреждённый файл не удаляется).
+  Разрушительного fallback нет: v1–v2, сбой копии и повреждённый файл останавливают обновление.
 
 **Заблокировано / остаётся вручную:**
 - Динамическая загрузка полей паспорта с сервера — ждёт REST-эндпоинт §10.1 (сейчас

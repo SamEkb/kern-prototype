@@ -87,10 +87,45 @@ class ProfileParamsTest {
         assertTrue(camera2.any { it.label == "Фокус" })
     }
 
+    private val ru = java.util.Locale.forLanguageTag("ru")
+    private val touptek = com.siams.kern_prototype.camera.CameraCapabilities(
+        supportsFocus = false, terms = com.siams.kern_prototype.camera.ParameterTerms.TOUPTEK,
+    )
+    private val camera2 = com.siams.kern_prototype.camera.CameraCapabilities(
+        supportsFocus = true, terms = com.siams.kern_prototype.camera.ParameterTerms.CAMERA2,
+    )
+
+    /** P3: HUD Touptek — значения профиля в мс, %, гамма, WB R/G/B; без ISO и фокуса. */
     @Test
-    fun hudLineHidesFocusWithoutSupport() {
-        val p = CameraProfile.defaultFor(LampType.DAYLIGHT)
-        assertFalse(profileLine(p, supportsFocus = false).contains("Фокус"))
-        assertTrue(profileLine(p, supportsFocus = true).contains("Фокус"))
+    fun hudLineUsesTouptekTerms() {
+        val p = CameraProfile.defaultFor(LampType.DAYLIGHT).copy(
+            exposureTimeNs = 8_000_000L, iso = 250, gamma = 120,
+            wbRedGain = 1.9f, wbGreenEvenGain = 1f, wbGreenOddGain = 1f, wbBlueGain = 1.7f,
+        )
+        assertEquals(
+            "Профиль: выдержка 8,00 мс · усиление 250% · гамма 120% · WB 1,90/1,00/1,70",
+            profileLine(p, touptek, ru),
+        )
+    }
+
+    @Test
+    fun hudLineShowsExposureOverOneSecondInSeconds() {
+        val p = CameraProfile.defaultFor(LampType.UF).copy(exposureTimeNs = 1_500_000_000L)
+        assertTrue(profileLine(p, touptek, ru), profileLine(p, touptek, ru).contains("выдержка 1,50 с ·"))
+        assertEquals("999,99 мс", formatExposureMs(999.99f, ru))
+        assertEquals("граница — ровно 1 с", "1,00 с", formatExposureMs(1000f, ru))
+        assertEquals("15,00 с", formatExposureMs(15_000f, ru))
+        assertEquals("0,10 мс", formatExposureMs(0.1f, ru))
+    }
+
+    /** Camera2 — прежние обозначения (1/x с, ISO) и фокус, если поддерживается. */
+    @Test
+    fun hudLineKeepsCamera2Terms() {
+        val p = CameraProfile.defaultFor(LampType.DAYLIGHT).copy(exposureTimeNs = 8_000_000L, iso = 100, focusDistance = 0f)
+        val line = profileLine(p, camera2, ru)
+        assertTrue(line, line.startsWith("Профиль: выдержка 1/125 с · ISO 100 · WB "))
+        assertTrue(line, line.endsWith(" · фокус ∞"))
+        assertFalse(line.contains("усиление"))
+        assertFalse(profileLine(p, camera2.copy(supportsFocus = false), ru).contains("фокус"))
     }
 }

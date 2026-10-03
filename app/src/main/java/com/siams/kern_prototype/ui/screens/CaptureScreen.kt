@@ -42,7 +42,9 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.siams.kern_prototype.R
+import com.siams.kern_prototype.camera.CameraCapabilities
 import com.siams.kern_prototype.camera.CameraControllerState
+import com.siams.kern_prototype.camera.ParameterTerms
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
 import com.siams.kern_prototype.ui.components.rememberMovableCameraPreview
@@ -107,7 +109,7 @@ fun CaptureScreen(
     val hud: @Composable ColumnScope.() -> Unit = {
         // FIXES §6: отметка «снят» — на переключателе освещения; здесь только номер стола.
         Text(stringResource(R.string.table_number, tableNumber), style = Body2Bold, color = Color.White)
-        Text(profileLine(profile, vm.controller.capabilities.supportsFocus), style = Body4, color = Color.White.copy(alpha = 0.85f))
+        Text(profileLine(profile, vm.controller.capabilities), style = Body4, color = Color.White.copy(alpha = 0.85f))
         if (!manualSupported) {
             Text(
                 stringResource(R.string.capture_manual_unsupported),
@@ -217,11 +219,31 @@ private fun ConnectingLabel(modifier: Modifier) {
     Text(stringResource(R.string.capture_usb_connecting), color = Color.White, style = Body2Bold, modifier = modifier)
 }
 
-/** Строка параметров профиля в HUD; фокус — только если камера его применяет (FIXES §3). */
-internal fun profileLine(p: CameraProfile, supportsFocus: Boolean): String {
-    val shutter = if (p.exposureTimeNs > 0) "1/${(1_000_000_000.0 / p.exposureTimeNs).toInt()}с" else "—"
-    val base = "Выдержка $shutter · ISO ${p.iso} · WB ${p.wbRedGain}/${p.wbBlueGain}"
-    if (!supportsFocus) return base
-    val focus = if (p.focusDistance == 0f) "∞" else String.format("%.2f", p.focusDistance)
-    return "$base · Фокус $focus"
+/**
+ * Строка параметров ПРОФИЛЯ в HUD — не фактические параметры кадра. Аудит снимка (R14) хранит
+ * состояние SDK около снимка, но и он не доказывает параметры экспонирования конкретного кадра.
+ * Обозначения — по камере (P3): Touptek — выдержка в мс/с, усиление в %, гамма, WB R/G/B;
+ * Camera2 — выдержка 1/x с, ISO, WB R/B. Фокус — только если камера его применяет (FIXES §3).
+ */
+internal fun profileLine(
+    p: CameraProfile,
+    capabilities: CameraCapabilities,
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    fun f2(v: Float) = String.format(locale, "%.2f", v)
+    val base = when (capabilities.terms) {
+        ParameterTerms.TOUPTEK -> {
+            val exposure = if (p.exposureTimeNs > 0) formatExposureMs(p.exposureTimeNs / 1_000_000f, locale) else "—"
+            val green = (p.wbGreenEvenGain + p.wbGreenOddGain) / 2f
+            "Профиль: выдержка $exposure · усиление ${p.iso}% · гамма ${p.gamma}% · " +
+                "WB ${f2(p.wbRedGain)}/${f2(green)}/${f2(p.wbBlueGain)}"
+        }
+        ParameterTerms.CAMERA2 -> {
+            val shutter = if (p.exposureTimeNs > 0) "1/${(1_000_000_000.0 / p.exposureTimeNs).toInt()} с" else "—"
+            "Профиль: выдержка $shutter · ISO ${p.iso} · WB ${f2(p.wbRedGain)}/${f2(p.wbBlueGain)}"
+        }
+    }
+    if (!capabilities.supportsFocus) return base
+    val focus = if (p.focusDistance == 0f) "∞" else String.format(locale, "%.2f", p.focusDistance)
+    return "$base · фокус $focus"
 }
