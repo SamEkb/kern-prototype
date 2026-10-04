@@ -30,7 +30,7 @@ internal class FakeCameraRig {
     /** 5k: события SDK, которые камера шлёт после включения авто-AE / запуска AWB (поток SDK). */
     @Volatile var aeEvents: List<Int> = emptyList()
     @Volatile var awbEvents: List<Int> = emptyList()
-    /** События, которые камера шлёт синхронно внутри последнего рабочего вызова AE (выключение авто). */
+    /** События, которые камера шлёт синхронно (разово) при первом выключении авто-AE во время AE. */
     @Volatile var aeOffEvents: List<Int> = emptyList()
     @Volatile var expoRange = intArrayOf(0, 100, 15_000_000, 8_000)   // [hr, min, max, def]
     @Volatile var gainRange = intArrayOf(0, 100, 5000, 100)
@@ -156,7 +156,8 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
     override fun setAutoExpoEnable(mode: Int) = handle("setAutoExpoEnable") {
         rig.log += "ae$mode$id"
         if (mode == 1) rig.aeEvents.forEach { e -> thread { listener?.invoke(e) } }
-        if (mode == 0) rig.aeOffEvents.forEach { e -> listener?.invoke(e) }
+        // Разово: AE выключает авто дважды (заморозка и применение профиля).
+        if (mode == 0) rig.aeOffEvents.also { rig.aeOffEvents = emptyList() }.forEach { e -> listener?.invoke(e) }
         hr("AutoExpoEnable")
     }
     override fun setExpoTime(microseconds: Int) = handle("setExpoTime") {

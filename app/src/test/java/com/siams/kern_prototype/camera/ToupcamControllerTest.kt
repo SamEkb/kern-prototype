@@ -677,13 +677,41 @@ class ToupcamControllerTest {
     /** Событие поступило в последнем рабочем вызове, обработано после него — оно в итоге процедуры. */
     @Test
     fun eventArrivedInLastCallIsInSummaryEvenIfProcessedLater() = runBlocking {
-        rig.aeOffEvents = listOf(0x000d)                   // AUTOEXPO_CONV внутри выключения авто-AE
         val c = controller()
         c.open(LampType.DAYLIGHT)
+        rig.aeOffEvents = listOf(0x000d)                   // AUTOEXPO_CONV внутри выключения авто-AE
         // Обработка события медленная: итог должен дождаться её (барьер очереди), а не собраться раньше.
         c.beforeEventRecordedForTest = { code -> if (code == 0x000d) Thread.sleep(300) }
         c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT))
         assertTrue(c.lastAutoSummary!!.events.toString(), c.lastAutoSummary!!.events.any { it.name == "AUTOEXPO_CONV" })
+    }
+
+    /** Буфер заполнен событиями окна без потерь (до них был кадр с номером) — не «неполно». */
+    @Test
+    fun fullBufferWithoutEvictedWindowEventsIsNotTruncated() = runBlocking {
+        val c = controller()
+        c.eventBufferSize = 4
+        c.open(LampType.DAYLIGHT)
+        // Кадр (номер есть, в буфер не пишется), затем ровно 4 диагностических события.
+        rig.aeOffEvents = listOf(ToupcamController.EVENT_IMAGE, 0x0001, 0x0001, 0x0001, 0x000d)
+        c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        val s = c.lastAutoSummary!!
+        assertEquals(listOf("EXPOSURE", "EXPOSURE", "EXPOSURE", "AUTOEXPO_CONV"), s.events.map { it.name })
+        assertFalse("все события окна сохранены", s.eventsTruncated)
+    }
+
+    /** Событие окна фактически вытеснено — «неполно». */
+    @Test
+    fun evictedWindowEventMarksSummaryTruncated() = runBlocking {
+        val c = controller()
+        c.eventBufferSize = 4
+        c.open(LampType.DAYLIGHT)
+        rig.aeOffEvents = listOf(0x0001, 0x0001, 0x0001, 0x0001, 0x0001, 0x000d)
+        c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        val s = c.lastAutoSummary!!
+        assertEquals(4, s.events.size)
+        assertTrue(s.eventsTruncated)
+        assertTrue(s.describe().contains("неполно"))
     }
 
     /** Очередь задержана: отметка времени — поступление события, а не его обработка. */

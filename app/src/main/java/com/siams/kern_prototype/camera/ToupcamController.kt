@@ -312,6 +312,22 @@ class ToupcamController internal constructor(
     /** 5k: последние события SDK — кольцевой буфер; итог процедуры выбирает их по номерам поступления. */
     private val recentEvents = ArrayDeque<ArrivedEvent>()
 
+    /** Размер буфера событий (для тестов вытеснения — меньше). */
+    @androidx.annotation.VisibleForTesting
+    internal var eventBufferSize: Int = EVENT_BUFFER
+
+    /**
+     * Окно авто-процедуры: события с номером больше [startSeq]. [firstEvictedSeq] — первый
+     * ФАКТИЧЕСКИ вытесненный из буфера номер этой части (номера получают и кадры, которые в буфер
+     * не попадают, поэтому разрыв номеров вытеснения не доказывает).
+     */
+    private class EventWindow(val generation: Long, val startSeq: Long) {
+        var firstEvictedSeq: Long? = null
+    }
+
+    /** Открытые окна процедур (доступ — под замком [recentEvents]). */
+    private val openWindows = mutableListOf<EventWindow>()
+
     /** 5k: коды событий, уже записанные в журнал (первое появление за подключение). */
     private val loggedEvents: MutableSet<Pair<Long, Int>> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
@@ -323,23 +339,32 @@ class ToupcamController internal constructor(
         beforeEventRecordedForTest?.invoke(event)
         synchronized(recentEvents) {
             recentEvents.addLast(ArrivedEvent(generation, seq, event, arrivedNs))
-            while (recentEvents.size > EVENT_BUFFER) recentEvents.removeFirst()
+            while (recentEvents.size > eventBufferSize) {
+                val evicted = recentEvents.removeFirst()
+                openWindows.forEach { w ->
+                    if (w.firstEvictedSeq == null && evicted.generation == w.generation && evicted.seq > w.startSeq) {
+                        w.firstEvictedSeq = evicted.seq
+                    }
+                }
+            }
         }
         if (loggedEvents.add(generation to event)) {
             runCatching { Log.i(TAG, "Событие SDK ${SdkEvents.name(event)} (0x%04x) — первое за подключение".format(event)) }
         }
     }
 
+    private fun openWindow(generation: Long, startSeq: Long): EventWindow =
+        synchronized(recentEvents) { EventWindow(generation, startSeq).also { openWindows += it } }
+
     /**
-     * События подключения поколения [generation] с номерами поступления в (startSeq, endSeq] —
-     * и признак, что часть окна уже вытеснена из буфера.
+     * Закрыть окно: события с номерами поступления в (startSeq, endSeq] и признак, что событие
+     * окна ФАКТИЧЕСКИ вытеснено из буфера.
      */
-    private fun eventsBetween(generation: Long, startSeq: Long, endSeq: Long, startNs: Long): Pair<List<SdkEventRecord>, Boolean> =
+    private fun closeWindow(w: EventWindow, endSeq: Long, startNs: Long): Pair<List<SdkEventRecord>, Boolean> =
         synchronized(recentEvents) {
-            val ofConnection = recentEvents.filter { it.generation == generation }
-            val inWindow = ofConnection.filter { it.seq in (startSeq + 1)..endSeq }
-            val oldest = ofConnection.firstOrNull()?.seq
-            val truncated = recentEvents.size >= EVENT_BUFFER && oldest != null && oldest > startSeq + 1
+            openWindows.remove(w)
+            val inWindow = recentEvents.filter { it.generation == w.generation && it.seq in (w.startSeq + 1)..endSeq }
+            val truncated = w.firstEvictedSeq?.let { it <= endSeq } == true
             inWindow.map { SdkEventRecord(it.code, SdkEvents.name(it.code), (it.arrivedNs - startNs) / 1_000_000) } to truncated
         }
 
@@ -492,7 +517,7 @@ class ToupcamController internal constructor(
         // с неотрицательной отметкой. Принадлежность — по номеру ПОСТУПЛЕНИЯ, не обработки.
         val startNs = System.nanoTime()
         val generation = stillGate.currentGeneration()
-        val startSeq = conn.arrivalBoundary()
+        val window = openWindow(generation, conn.arrivalBoundary())
         var result: CameraProfile? = null
         var outcome = "ошибка"
         try {
@@ -511,7 +536,7 @@ class ToupcamController internal constructor(
             // события окна уже обработаны (в буфере).
             val endSeq = conn.arrivalBoundary()
             val after = withContext(NonCancellable) { readback(conn) }
-            val (events, truncated) = eventsBetween(generation, startSeq, endSeq, startNs)
+            val (events, truncated) = closeWindow(window, endSeq, startNs)
             val summary = AutoProcedureSummary(
                 procedure = name,
                 outcome = outcome,
