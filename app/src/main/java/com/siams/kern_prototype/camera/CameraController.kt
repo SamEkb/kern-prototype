@@ -2,6 +2,9 @@ package com.siams.kern_prototype.camera
 
 import android.annotation.SuppressLint
 import android.content.Context
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
+import android.Manifest
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -280,25 +283,43 @@ class CameraController @Inject constructor(
             ?: Size(1920, 1080)
     }
 
-    private suspend fun openDevice(id: String): CameraDevice =
-        suspendCancellableCoroutine { cont ->
-            cameraManager.openCamera(id, object : CameraDevice.StateCallback() {
-                override fun onOpened(camera: CameraDevice) {
-                    if (cont.isActive) cont.resume(camera)
-                }
-
-                override fun onDisconnected(camera: CameraDevice) {
-                    camera.close()
-                }
-
-                override fun onError(camera: CameraDevice, error: Int) {
-                    camera.close()
-                    if (cont.isActive) cont.resumeWithException(
-                        IllegalStateException("Ошибка камеры: код $error"),
-                    )
-                }
-            }, handler)
+    /**
+     * Открыть камеру Camera2 (запасной путь). Разрешение CAMERA проверяется явно: без него —
+     * понятная ошибка подключения, а не падение. Если разрешение отозвали между проверкой и
+     * вызовом, [SecurityException] тоже становится ошибкой подключения.
+     */
+    private suspend fun openDevice(id: String): CameraDevice {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            throw IllegalStateException("Нет разрешения на использование камеры телефона. Разрешите доступ к камере в настройках приложения.")
         }
+        return suspendCancellableCoroutine { cont ->
+            try {
+                openCameraWithCallbacks(id, cont)
+            } catch (e: SecurityException) {
+                if (cont.isActive) cont.resumeWithException(IllegalStateException("Доступ к камере телефона запрещён", e))
+            }
+        }
+    }
+
+    @androidx.annotation.RequiresPermission(Manifest.permission.CAMERA)
+    private fun openCameraWithCallbacks(id: String, cont: kotlinx.coroutines.CancellableContinuation<CameraDevice>) {
+        cameraManager.openCamera(id, object : CameraDevice.StateCallback() {
+            override fun onOpened(camera: CameraDevice) {
+                if (cont.isActive) cont.resume(camera)
+            }
+
+            override fun onDisconnected(camera: CameraDevice) {
+                camera.close()
+            }
+
+            override fun onError(camera: CameraDevice, error: Int) {
+                camera.close()
+                if (cont.isActive) cont.resumeWithException(
+                    IllegalStateException("Ошибка камеры: код $error"),
+                )
+            }
+        }, handler)
+    }
 
     @Suppress("DEPRECATION")
     private suspend fun createSession(dev: CameraDevice, surfaces: List<Surface>): CameraCaptureSession =
