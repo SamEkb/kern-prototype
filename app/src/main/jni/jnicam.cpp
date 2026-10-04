@@ -403,9 +403,13 @@ JNIEXPORT jint JNICALL Java_com_droid_usbcam_CamLib_setOption(JNIEnv *env, jobje
 // R14: фактическое состояние параметров (readback) — пары [HRESULT, значение...]:
 //  0 hr,expoUs  2 hr,realExpoUs  4 hr,gain%  6 hr,gamma  8 hr,wbR,wbG,wbB  12 hr,aeMode
 //  14 hr,expoMin,expoMax,expoDef  18 hr,gainMin,gainMax,gainDef  22 hr,optWbGain  24 hr,optIsp
+// 5l (диагностика WB/AE, только чтение; прежние индексы не меняются):
+//  26 hr,aeTarget  28 hr,temp,tint  31 hr,aePolicy  33 hr,aePercent  35 hr,linear  37 hr,curve
+//  39 hr,byteOrder  41 hr,rgbFormat
+static const int READ_STATE_LEN = 43;
 JNIEXPORT jintArray JNICALL Java_com_droid_usbcam_CamLib_readState(JNIEnv *env, jobject obj) {
-    jint v[26];
-    for (int i = 0; i < 26; ++i) v[i] = 0;
+    jint v[READ_STATE_LEN];
+    for (int i = 0; i < READ_STATE_LEN; ++i) v[i] = 0;
     if (gHcam) {
         unsigned t = 0, rt = 0, tmin = 0, tmax = 0, tdef = 0;
         unsigned short g = 0, gmin = 0, gmax = 0, gdef = 0;
@@ -422,11 +426,22 @@ JNIEXPORT jintArray JNICALL Java_com_droid_usbcam_CamLib_readState(JNIEnv *env, 
         v[19] = gmin; v[20] = gmax; v[21] = gdef;
         v[22] = (jint) Toupcam_get_Option(gHcam, TOUPCAM_OPTION_WBGAIN, &optWb); v[23] = optWb;
         v[24] = (jint) Toupcam_get_Option(gHcam, TOUPCAM_OPTION_ISP, &optIsp);   v[25] = optIsp;
+        // 5l: только чтение (get_*), HRESULT каждого вызова — в массиве.
+        unsigned short aeTarget = 0;
+        int temp = 0, tint = 0, aePolicy = 0, aePercent = 0, linear = 0, curve = 0, byteOrder = 0, rgb = 0;
+        v[26] = (jint) Toupcam_get_AutoExpoTarget(gHcam, &aeTarget);                       v[27] = aeTarget;
+        v[28] = (jint) Toupcam_get_TempTint(gHcam, &temp, &tint);                          v[29] = temp; v[30] = tint;
+        v[31] = (jint) Toupcam_get_Option(gHcam, TOUPCAM_OPTION_AUTOEXP_POLICY, &aePolicy);       v[32] = aePolicy;
+        v[33] = (jint) Toupcam_get_Option(gHcam, TOUPCAM_OPTION_AUTOEXPOSURE_PERCENT, &aePercent); v[34] = aePercent;
+        v[35] = (jint) Toupcam_get_Option(gHcam, TOUPCAM_OPTION_LINEAR, &linear);           v[36] = linear;
+        v[37] = (jint) Toupcam_get_Option(gHcam, TOUPCAM_OPTION_CURVE, &curve);             v[38] = curve;
+        v[39] = (jint) Toupcam_get_Option(gHcam, TOUPCAM_OPTION_BYTEORDER, &byteOrder);     v[40] = byteOrder;
+        v[41] = (jint) Toupcam_get_Option(gHcam, TOUPCAM_OPTION_RGB, &rgb);                 v[42] = rgb;
     } else {
-        for (int i = 0; i < 26; i += 2) v[i] = NO_CAMERA;
+        for (int i : {0, 2, 4, 6, 8, 12, 14, 18, 22, 24, 26, 28, 31, 33, 35, 37, 39, 41}) v[i] = NO_CAMERA;
     }
-    jintArray arr = env->NewIntArray(26);
-    env->SetIntArrayRegion(arr, 0, 26, v);
+    jintArray arr = env->NewIntArray(READ_STATE_LEN);
+    env->SetIntArrayRegion(arr, 0, READ_STATE_LEN, v);
     return arr;
 }
 

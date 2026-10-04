@@ -619,6 +619,20 @@ class ToupcamControllerTest {
         assertEquals(listOf("AwbInit"), s.calls.map { it.op })
         assertEquals(1f, s.result!!.wbRed, 0f)           // getWhiteBalanceGain = 0 → множитель 1
         assertEquals(listOf("WBGAIN"), s.events.map { it.name })
+        // 5l: коды новых чтений — в состоянии SDK после процедуры и в строке журнала сводки.
+        assertEquals("0x80004001", s.readbackAfter!!.readHresults!!["tempTint"])
+        assertTrue(s.describe(), s.describe().contains("tempTint=0x80004001"))
+    }
+
+    /** 5l: строка журнала при подключении содержит коды новых чтений. */
+    @Test
+    fun connectLogContainsReadHresults() = runBlocking {
+        org.robolectric.shadows.ShadowLog.clear()
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val line = org.robolectric.shadows.ShadowLog.getLogsForTag("ToupcamController")
+            .map { it.msg }.single { it.startsWith("Состояние SDK после подключения") }
+        assertTrue(line, line.contains("readHresults={autoExposureTarget=0x00000000, tempTint=0x80004001"))
     }
 
     /** Отмена процедуры: итог «отменена», ручной режим возвращён, состояние SDK всё равно прочитано. */
@@ -888,6 +902,24 @@ class ToupcamControllerTest {
         val ffc = c.lastFfcMemory!!
         assertEquals(listOf("start", "applied", "pulled", "template", "quality", "end:ok"), ffc.phases.map { it.name })
         assertEquals(0, probeThreadsAlive())
+    }
+
+    /** 5l: аудит снимка содержит новые чтения; отказ Temp/Tint — «неизвестно». */
+    @Test
+    fun auditReadbackHasDiagnosticReads() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val rb = c.capture(target(), LampType.DAYLIGHT).audit!!.readback!!
+        assertEquals(120, rb.autoExposureTarget)
+        assertEquals(null, rb.tempTint)
+        assertEquals("код отказа сохранён", "0x80004001", rb.readHresults!!["tempTint"])
+        assertEquals("0x00000000", rb.readHresults!!["autoExposureTarget"])
+        assertEquals(1, rb.autoExposurePolicy)
+        assertEquals(2, rb.curveToneMapping)
+        rig.tempTintHr = 0
+        val ok = c.capture(target(), LampType.DAYLIGHT).audit!!.readback!!
+        assertEquals(listOf(6503, 1000), ok.tempTint)
+        assertEquals("0x00000000", ok.readHresults!!["tempTint"])
     }
 
     @Test

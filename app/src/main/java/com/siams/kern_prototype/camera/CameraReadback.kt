@@ -20,6 +20,29 @@ data class CameraReadback(
     val gainRangePercent: IntRange3? = null,
     val builtinWbGainOption: Int? = null,
     val ispOption: Int? = null,
+    // 5l (диагностика WB/AE, только чтение): null — SDK отказал или значение не прочитано.
+    /** Цель автоэкспозиции (`get_AutoExpoTarget`). */
+    val autoExposureTarget: Int? = null,
+    /** Температура/оттенок, если SDK работает в режиме Temp/Tint (`get_TempTint`). */
+    val tempTint: List<Int>? = null,
+    /** `TOUPCAM_OPTION_AUTOEXP_POLICY`. */
+    val autoExposurePolicy: Int? = null,
+    /** `TOUPCAM_OPTION_AUTOEXPOSURE_PERCENT`. */
+    val autoExposurePercent: Int? = null,
+    /** `TOUPCAM_OPTION_LINEAR` (встроенное линейное тональное преобразование). */
+    val linearToneMapping: Int? = null,
+    /** `TOUPCAM_OPTION_CURVE` (встроенная кривая: 0 — выкл., 1 — полином, 2 — логарифм). */
+    val curveToneMapping: Int? = null,
+    /** `TOUPCAM_OPTION_BYTEORDER` (0 — RGB, 1 — BGR). */
+    val byteOrder: Int? = null,
+    /** `TOUPCAM_OPTION_RGB` (0 — RGB24, …). */
+    val rgbFormat: Int? = null,
+    /**
+     * 5l: HRESULT каждого нового чтения («0x…»), по имени поля. Различает неподдерживаемое чтение,
+     * другую ошибку SDK и успех. Нет записи — код неизвестен (например, массив прежней раскладки):
+     * отказ при этом не подразумевается.
+     */
+    val readHresults: Map<String, String>? = null,
 ) {
     @Serializable
     data class IntRange3(val min: Int, val max: Int, val default: Int)
@@ -27,7 +50,17 @@ data class CameraReadback(
     companion object {
         private fun ok(hr: Int) = hr >= 0 // HRESULT: неотрицательный — успех
 
-        /** Разбор массива из `CamLib.readState()` (раскладка — jnicam.cpp). */
+        /** 5l: новые чтения — имя поля и индекс HRESULT в массиве `readState` (jnicam.cpp). */
+        private val DIAGNOSTIC_READS = listOf(
+            "autoExposureTarget" to 26, "tempTint" to 28, "autoExposurePolicy" to 31,
+            "autoExposurePercent" to 33, "linearToneMapping" to 35, "curveToneMapping" to 37,
+            "byteOrder" to 39, "rgbFormat" to 41,
+        )
+
+        /**
+         * Разбор массива из `CamLib.readState()` (раскладка — jnicam.cpp). Короче ожидаемого —
+         * недостающие значения «неизвестно» (null), а не ноль.
+         */
         fun parse(v: IntArray): CameraReadback {
             fun at(i: Int) = v.getOrElse(i) { -1 }
             fun value(hrIdx: Int) = if (ok(at(hrIdx))) at(hrIdx + 1) else null
@@ -42,6 +75,18 @@ data class CameraReadback(
                 gainRangePercent = if (ok(at(18))) IntRange3(at(19), at(20), at(21)) else null,
                 builtinWbGainOption = value(22),
                 ispOption = value(24),
+                autoExposureTarget = value(26),
+                tempTint = if (ok(at(28))) listOf(at(29), at(30)) else null,
+                autoExposurePolicy = value(31),
+                autoExposurePercent = value(33),
+                linearToneMapping = value(35),
+                curveToneMapping = value(37),
+                byteOrder = value(39),
+                rgbFormat = value(41),
+                readHresults = DIAGNOSTIC_READS
+                    .mapNotNull { (name, hrIdx) -> v.getOrNull(hrIdx)?.let { name to "0x%08x".format(it) } }
+                    .toMap()
+                    .ifEmpty { null },
             )
         }
     }

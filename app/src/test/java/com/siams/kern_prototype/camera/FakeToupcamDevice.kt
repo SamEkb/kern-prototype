@@ -27,6 +27,8 @@ internal class FakeCameraRig {
     @Volatile var pullImageGate: CountDownLatch? = null         // медленная отрисовка превью
     /** readState() бросает (SDK не отвечает) / диапазоны SDK заданы тестом. */
     @Volatile var failReadState = false
+    /** HRESULT чтения Temp/Tint (по умолчанию — не поддерживается: камера в режиме RGB Gain). */
+    @Volatile var tempTintHr: Int = 0x80004001.toInt()
     /** 5k: события SDK, которые камера шлёт после включения авто-AE / запуска AWB (поток SDK). */
     @Volatile var aeEvents: List<Int> = emptyList()
     @Volatile var awbEvents: List<Int> = emptyList()
@@ -190,6 +192,9 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
         intArrayOf(
             0, expoUs, 0, expoUs, 0, gainPct, 0, gammaVal, wbHr, wb[0], wb[1], wb[2], 0, 0,
             e[0], e[1], e[2], e[3], g[0], g[1], g[2], g[3], 0, 1, 0, 0,
+            // 5l: цель AE, Temp/Tint (по умолчанию отказ — режим RGB Gain), политика и процент AE,
+            // LINEAR, CURVE, BYTEORDER, RGB.
+            0, 120, rig.tempTintHr, 6503, 1000, 0, 1, 0, 10, 0, 1, 0, 2, 0, 0, 0, 0,
         )
     }
     override fun describe() = "sdk=fake\nmodel=FAKE$id"

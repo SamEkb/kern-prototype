@@ -187,7 +187,7 @@ class ToupcamController internal constructor(
             _limits.value = limits
             Log.i(TAG, "Границы камеры: $limits")
             applyToConnection(conn, profile)
-            readback(conn)?.let { Log.i(TAG, "Фактические параметры после подключения: $it") }
+            readback(conn)?.let { Log.i(TAG, "Состояние SDK после подключения (не доказанные параметры кадра): $it") }
             previewBitmap = Bitmap.createBitmap(previewSize.width, previewSize.height, Bitmap.Config.ARGB_8888)
             // release() пришёл, пока шло подключение, — подключение уже закрывается.
             check(!released && connection === conn && !conn.isClosed) { "Камера освобождена" }
