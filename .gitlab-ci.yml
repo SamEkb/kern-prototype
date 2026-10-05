@@ -1,0 +1,48 @@
+# CI проекта: сборка, юнит-тесты и lint — те же проверки, что локально.
+# Наличие этого файла отключает Auto DevOps (его Heroku/Docker-задачи раннеру не подходят).
+# Окружение (JDK 21, Android SDK/NDK) готовит ci/setup-android.sh — с кешем на раннере.
+
+stages:
+  - build
+  - test
+
+variables:
+  # Без фонового демона: процесс Gradle не остаётся на раннере после задачи.
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+default:
+  interruptible: true
+  before_script:
+    - source ci/setup-android.sh
+
+assemble:
+  stage: build
+  script:
+    - ./gradlew :app:assembleDebug --stacktrace
+  artifacts:
+    paths:
+      - app/build/outputs/apk/debug/app-debug.apk
+    expire_in: 1 week
+
+unit-tests:
+  stage: test
+  script:
+    - ./gradlew :app:testDebugUnitTest --stacktrace
+  artifacts:
+    when: always
+    reports:
+      junit: app/build/test-results/testDebugUnitTest/TEST-*.xml
+    paths:
+      - app/build/reports/tests/testDebugUnitTest/
+    expire_in: 1 week
+
+lint:
+  stage: test
+  script:
+    - ./gradlew :app:lintDebug --stacktrace
+  artifacts:
+    when: always
+    paths:
+      - app/build/reports/lint-results-debug.html
+      - app/build/reports/lint-results-debug.xml
+    expire_in: 1 week
