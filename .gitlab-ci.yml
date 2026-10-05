@@ -3,22 +3,29 @@
 # Окружение (JDK 21, Android SDK/NDK) готовит ci/setup-android.sh — с кешем на раннере.
 #
 # Одна задача, а не три: раннер (custom executor) запускает задачи проекта в одной и той же папке,
-# параллельные задачи стирали друг другу app/build/. Так проект и компилируется один раз.
+# параллельные задачи стирали друг другу app/build/. Шаги — по очереди, отдельными вызовами Gradle:
+# одновременные тесты и lint обрывали задачу (похоже на нехватку памяти раннера), а так в логе
+# видно, на каком шаге это происходит.
 
 variables:
   # Без фонового демона: процесс Gradle не остаётся на раннере после задачи.
   GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  # Kotlin-компилятор — внутри процесса Gradle (общий Kotlin-демон раннера не делится между
+  # сборками); не больше двух параллельных воркеров.
+  GRADLE_ARGS: "--stacktrace --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process"
 
 check:
-  # Чистая сборка с тестами дольше 5 минут; фактический предел ограничен ещё и настройками раннера.
   timeout: 30 minutes
   before_script:
+    - ci/runner-resources.sh
     - source ci/setup-android.sh
   script:
-    # Kotlin-компилятор — внутри процесса Gradle: общий Kotlin-демон раннера не делится между сборками.
-    # --continue: lint и тесты выполняются, даже если упало другое.
-    - ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
-      --continue --stacktrace -Pkotlin.compiler.execution.strategy=in-process
+    - echo "=== assembleDebug" && ./gradlew :app:assembleDebug $GRADLE_ARGS
+    - ci/runner-resources.sh
+    - echo "=== testDebugUnitTest" && ./gradlew :app:testDebugUnitTest $GRADLE_ARGS || failed=1
+    - ci/runner-resources.sh
+    - echo "=== lintDebug" && ./gradlew :app:lintDebug $GRADLE_ARGS || failed=1
+    - exit ${failed:-0}
   artifacts:
     when: always
     reports:
