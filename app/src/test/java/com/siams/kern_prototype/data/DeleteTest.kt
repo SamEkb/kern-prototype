@@ -21,6 +21,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -60,6 +61,23 @@ class DeleteTest {
     fun tearDown() {
         photo.parentFile?.setWritable(true)
         db.close()
+    }
+
+    /**
+     * Запретить удаление файлов снимков: папка без права записи. Где запрет не действует (процесс
+     * от root, например на CI-раннере), ошибку удаления так не воспроизвести — тест пропускается,
+     * а не падает и не проходит впустую.
+     */
+    private fun blockDeletion() {
+        val dir = photo.parentFile!!
+        dir.setWritable(false)
+        val probe = File(dir, ".write-probe")
+        val enforced = runCatching { !probe.createNewFile() }.getOrDefault(true)
+        if (!enforced) {
+            probe.delete()
+            dir.setWritable(true)
+        }
+        assumeTrue("запрет записи в папку не действует (root?) — ошибку удаления не воспроизвести", enforced)
     }
 
     /** Запустить [op], отменив её в конце тела транзакции (commit Room при этом состоится). */
@@ -104,7 +122,7 @@ class DeleteTest {
 
     @Test
     fun deleteLayer_fileDeletionErrorKeepsDbConsistent() = runBlocking {
-        photo.parentFile!!.setWritable(false) // файл не удалить
+        blockDeletion() // файл не удалить
         repo.deleteLayer(layerId)             // операция не падает
         assertNull(db.layerDao().getById(layerId))
         assertTrue("лишний файл остаётся, ссылок на него нет", photo.exists())
@@ -134,7 +152,7 @@ class DeleteTest {
 
     @Test
     fun deleteTable_fileDeletionError() = runBlocking {
-        photo.parentFile!!.setWritable(false)
+        blockDeletion()
         repo.deleteTable(tableId)
         assertNull(db.tableDao().getById(tableId))
         assertTrue(photo.exists())
@@ -161,7 +179,7 @@ class DeleteTest {
 
     @Test
     fun deleteDrilling_fileDeletionError() = runBlocking {
-        photo.parentFile!!.setWritable(false)
+        blockDeletion()
         repo.deleteDrilling(drillingId)
         assertNull(db.drillingDao().getById(drillingId))
         assertTrue(photo.exists())
