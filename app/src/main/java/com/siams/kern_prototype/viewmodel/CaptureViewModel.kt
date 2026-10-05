@@ -8,6 +8,7 @@ import com.siams.kern_prototype.camera.CameraControllerState
 import com.siams.kern_prototype.camera.KernCamera
 import com.siams.kern_prototype.camera.UsbDeviceEvents
 import com.siams.kern_prototype.data.KernRepository
+import com.siams.kern_prototype.data.hasServerCopy
 import com.siams.kern_prototype.data.db.relation.TableWithLayers
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
@@ -63,9 +64,20 @@ class CaptureViewModel @Inject constructor(
 
     val cameraState: StateFlow<CameraControllerState> = controller.state
 
+    /** Отказы SDK при применении профиля — предупреждение (съёмка не блокируется). */
+    val applyWarning: StateFlow<com.siams.kern_prototype.camera.ApplyWarning?> = controller.applyWarning
+
     val table: StateFlow<TableWithLayers?> = _tableId
         .flatMapLatest { id -> if (id == null) flowOf(null) else repository.observeTable(id) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * R04: снимок текущей лампы в этом столе уже отправлялся на S900 — пересъёмка не заменит его на
+     * сервере (предупреждение в HUD, съёмку не блокирует).
+     */
+    val currentLampOnServer: StateFlow<Boolean> = kotlinx.coroutines.flow.combine(table, _lamp) { t, l ->
+        t?.layers?.firstOrNull { it.lampType == l }?.hasServerCopy() == true
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /**
      * FIXES §6: освещения, кадр которых ЗАФИКСИРОВАН в текущем столе — по слоям из Room, поэтому

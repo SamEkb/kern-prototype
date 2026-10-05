@@ -593,7 +593,11 @@ class DrillingUploaderTest {
             .setRunAttemptCount(attempt)
             .setWorkerFactory(object : WorkerFactory() {
                 override fun createWorker(appContext: Context, workerClassName: String, workerParameters: WorkerParameters) =
-                    UploadWorker(appContext, workerParameters, uploader, repo)
+                    UploadWorker(
+                        appContext, workerParameters,
+                        com.siams.kern_prototype.data.db.DatabaseGate(appContext) { db }, // БД доступна
+                        { uploader }, { repo },
+                    )
             })
             .build()
 

@@ -95,6 +95,8 @@ class ToupcamController internal constructor(
         val boundary: Long,
         /** R14: отчёт этого применения (значения после ограничения и результаты сеттеров). */
         val report: ToupcamProfileApplier.ApplyReport?,
+        /** Последняя известная выдержка подключения до этого применения (кадр «в пути»); null — неизвестна. */
+        val previousExposureUs: Long? = null,
     ) {
         /** Кадры превью, ПОСТУПИВШИЕ после [boundary] (считаются в очереди подключения). */
         val framesAfter = java.util.concurrent.atomic.AtomicInteger(0)
@@ -105,7 +107,24 @@ class ToupcamController internal constructor(
         set(value) {
             field = value
             if (value != null) lastConfirmed = value.profile
+            value?.let { knownExposureUs(it.report) }?.let { lastKnownExposureUs = it }
+            // Предупреждение — из отчёта именно этого применения (текущее подключение и профиль):
+            // новое применение, переподключение и закрытие сбрасывают его вместе с [applied].
+            _applyWarning.value = value?.report?.rejected?.takeIf { it.isNotEmpty() }
+                ?.let { ApplyWarning(value.profile.lampType, it) }
         }
+
+    /**
+     * Последняя выдержка, известная для текущего подключения: прочитанная из SDK при подключении
+     * (до профиля) или принятая SDK при применении. Не сбрасывается авто-процедурами и отказом
+     * сеттера выдержки (отклонённый сеттер считается не изменившим выдержку) — это оценка кадра,
+     * ещё «в пути» при следующем применении. null — неизвестна; сбрасывается при закрытии подключения.
+     */
+    @Volatile
+    private var lastKnownExposureUs: Long? = null
+
+    private val _applyWarning = MutableStateFlow<ApplyWarning?>(null)
+    override val applyWarning: StateFlow<ApplyWarning?> = _applyWarning.asStateFlow()
 
     /** Последний подтверждённо применённый профиль — для отображения (HUD, редактор). */
     @Volatile
@@ -183,8 +202,11 @@ class ToupcamController internal constructor(
                 runCatching { Log.i(TAG, "Камера:\n" + dev.describe().trim()) }
             }
             // R14: границы камеры до применения профиля (чтение только геттерами SDK).
-            val limits = CameraLimits.from(readback(conn))
+            val before = readback(conn)
+            val limits = CameraLimits.from(before)
             _limits.value = limits
+            // Выдержка, с которой камера уже работает: кадр «в пути» при первом применении профиля.
+            lastKnownExposureUs = before?.exposureUs?.toLong()
             Log.i(TAG, "Границы камеры: $limits")
             applyToConnection(conn, profile)
             readback(conn)?.let { Log.i(TAG, "Состояние SDK после подключения (не доказанные параметры кадра): $it") }
@@ -399,11 +421,12 @@ class ToupcamController internal constructor(
         profile: CameraProfile,
         block: (ToupcamDevice) -> CameraProfile = { dev -> applyAndReport(dev, profile); profile },
     ): CameraProfile {
+        val previousExposureUs = lastKnownExposureUs
         applied = null
         return conn.run { dev ->
             val result = block(dev)
             // Сеттеры выполнены: граница — после них; события, поступившие во время сеттеров, раньше неё.
-            applied = Applied(result, conn.arrivalBoundary(), lastApplyReport)
+            applied = Applied(result, conn.arrivalBoundary(), lastApplyReport, previousExposureUs)
             result
         }
     }
@@ -426,17 +449,19 @@ class ToupcamController internal constructor(
     }
 
     /**
-     * Дождаться [SETTLE_FRAMES] кадров превью после применения [a]. Не дождались за
-     * [SETTLE_TIMEOUT_MS] — ошибка: снимать с неподтверждёнными параметрами нельзя.
+     * Дождаться [SETTLE_FRAMES] кадров превью после применения [a]. Предел зависит от выдержки
+     * ([settleTimeoutFor]): при длинной выдержке кадры превью идут редко. Не дождались — ошибка:
+     * снимать с неподтверждёнными параметрами нельзя.
      * Состояние ожидания хранится с применением — отменённое ожидание продолжится при следующем снимке.
      */
     private suspend fun awaitSettled(a: Applied) {
-        val ok = withTimeoutOrNull(SETTLE_TIMEOUT_MS) {
+        val timeoutMs = settleTimeoutFor(knownExposureUs(a.report), a.previousExposureUs)
+        val ok = withTimeoutOrNull(timeoutMs) {
             while (a.framesAfter.get() < SETTLE_FRAMES) delay(FRAME_POLL_MS)
         }
         if (ok == null) {
             throw IllegalStateException(
-                "Камера не подтвердила новые параметры (нет кадров превью ${SETTLE_TIMEOUT_MS / 1000} с) — снимок не выполнен",
+                "Камера не подтвердила новые параметры (нет кадров превью ${timeoutMs / 1000} с) — снимок не выполнен",
             )
         }
     }
@@ -600,7 +625,7 @@ class ToupcamController internal constructor(
             limits = _limits.value,
             readback = readback(conn),
         )
-        val still = snapStillBlocking(conn)
+        val still = snapStillBlocking(conn, knownExposureUs(ready.report))
         probe.mark("pulled")
         if (applyFfcIfConfigured(conn, still, profile)) probe.mark("ffc") // §2.3: нормализация делением на эталон
         // R09: неудачный compress — ошибка съёмки; R08: файл появляется целиком или никак.
@@ -653,9 +678,9 @@ class ToupcamController internal constructor(
 
     private suspend fun captureFfcLocked(lampType: LampType, probe: MemoryProbe): FfcReference {
         val conn = connectionForSnap()
-        ensureLampApplied(conn, lampType) // эталон — с профилем этой лампы (в редакторе — рабочим)
+        val ready = ensureLampApplied(conn, lampType) // эталон — с профилем этой лампы (в редакторе — рабочим)
         probe.mark("applied")
-        val still = snapStillBlocking(conn)
+        val still = snapStillBlocking(conn, knownExposureUs(ready.report))
         probe.mark("pulled")
         val h = (FFC_TEMPLATE_WIDTH.toLong() * still.height / still.width).toInt().coerceAtLeast(1)
         val small = Bitmap.createScaledBitmap(still, FFC_TEMPLATE_WIDTH, h, true)
@@ -684,12 +709,15 @@ class ToupcamController internal constructor(
 
     /**
      * Полнокадровый снимок с ожиданием EVENT_STILLIMAGE (§3c). Возвращает буфер с кадром.
+     * Ожидание зависит от выдержки [exposureUs] ([snapTimeoutFor]): длинная выдержка — не отказ камеры;
+     * null — действующая выдержка неизвестна (отказ сеттера), ждём до верхней границы.
      *
      * Операция занята до конца ЧТЕНИЯ кадра. Таймаут или отмена (в том числе во время чтения)
      * оставляют исход неизвестным: запоздавшее событие/чтение не должно завершить следующий
      * снимок, поэтому камера переводится в режим восстановления (переподключение).
      */
-    private suspend fun snapStillBlocking(conn: CameraConnection): Bitmap {
+    private suspend fun snapStillBlocking(conn: CameraConnection, exposureUs: Long?): Bitmap {
+        val timeoutMs = snapTimeoutFor(snapTimeoutMs, exposureUs)
         val still = ensureStillBitmap()
         val done = CompletableDeferred<Unit>()
         val pending = stillGate.begin(still) { result ->
@@ -711,12 +739,12 @@ class ToupcamController internal constructor(
             error("Камера отклонила снимок (Snap)")
         }
         try {
-            withTimeout(snapTimeoutMs) { done.await() }
+            withTimeout(timeoutMs) { done.await() }
         } catch (e: TimeoutCancellationException) {
             stillGate.abandon(pending)
             val recovered = runCatching { reconnect() }.isSuccess
             throw IllegalStateException(
-                "Камера не вернула снимок за ${snapTimeoutMs / 1000} с. " +
+                "Камера не вернула снимок за ${timeoutMs / 1000} с. " +
                     if (recovered) "Камера переподключена — повторите снимок." else "Повторите снимок для переподключения.",
                 e,
             )
@@ -933,6 +961,7 @@ class ToupcamController internal constructor(
         if (connection === conn) {
             stillGate.fail(IllegalStateException("Камера освобождена"))
             applied = null
+            lastKnownExposureUs = null
             preview = previewBitmap
             connection = null
             previewSurface = null
@@ -957,12 +986,51 @@ class ToupcamController internal constructor(
 
         internal const val SNAP_TIMEOUT_MS = 15_000L
 
+        /** Ожидание снимка: запас на выдержку (× выдержка) и верхняя граница. */
+        internal const val SNAP_EXPOSURE_FACTOR = 3L
+        internal const val SNAP_TIMEOUT_MAX_MS = 120_000L
+
+        /**
+         * Сколько ждать снимка: базовое время [baseMs] (считывание и передача кадра) плюс
+         * [SNAP_EXPOSURE_FACTOR] × выдержка, но не больше [SNAP_TIMEOUT_MAX_MS] и не меньше [baseMs].
+         * Выдержка неизвестна (null) — верхняя граница. Реальный период кадров SDK здесь не
+         * учитывается — проверяется на камере.
+         */
+        internal fun snapTimeoutFor(baseMs: Long, exposureUs: Long?): Long {
+            val max = maxOf(baseMs, SNAP_TIMEOUT_MAX_MS)
+            if (exposureUs == null) return max
+            val exposureMs = exposureUs.coerceAtLeast(0) / 1_000L
+            return (baseMs + SNAP_EXPOSURE_FACTOR * exposureMs).coerceIn(baseMs, max)
+        }
+
+        /**
+         * Действующая выдержка после применения по его отчёту: отправленная в SDK (после ограничения
+         * границами камеры), если SDK принял и её, и отключение автоэкспозиции. Отчёта нет или один из
+         * этих сеттеров отклонён — null: камера может снимать с прежней или авто-выдержкой.
+         */
+        internal fun knownExposureUs(report: ToupcamProfileApplier.ApplyReport?): Long? =
+            report?.takeIf { "ExpoTime" !in it.rejected && "AutoExpoEnable" !in it.rejected }?.exposureUs?.toLong()
+
+        /**
+         * Предел ожидания [SETTLE_FRAMES] кадров превью после применения: [SETTLE_TIMEOUT_MS] плюс
+         * ([SETTLE_FRAMES] + 1) периода кадра — один на кадр прежних параметров, ещё «в пути», —
+         * где период оценивается большей из новой выдержки и [previousExposureUs]; не больше
+         * [SETTLE_TIMEOUT_MAX_MS]. Новая выдержка неизвестна (null, отказ сеттера) — верхняя граница.
+         * Прежняя неизвестна — учитывается только новая.
+         */
+        internal fun settleTimeoutFor(exposureUs: Long?, previousExposureUs: Long?): Long {
+            if (exposureUs == null) return SETTLE_TIMEOUT_MAX_MS
+            val periodMs = maxOf(exposureUs, previousExposureUs ?: 0L).coerceAtLeast(0) / 1_000L
+            return (SETTLE_TIMEOUT_MS + (SETTLE_FRAMES + 1) * periodMs).coerceIn(SETTLE_TIMEOUT_MS, SETTLE_TIMEOUT_MAX_MS)
+        }
+
         /** 5k: сколько последних событий SDK (кроме кадров) хранить для итогов процедур. */
         private const val EVENT_BUFFER = 2048
 
         // R10: после смены параметров перед снимком ждём кадры превью (проверить на камере).
-        private const val SETTLE_FRAMES = 2
-        private const val SETTLE_TIMEOUT_MS = 2_000L
+        internal const val SETTLE_FRAMES = 2
+        internal const val SETTLE_TIMEOUT_MS = 2_000L
+        internal const val SETTLE_TIMEOUT_MAX_MS = 60_000L
         private const val FRAME_POLL_MS = 20L
 
         /** Сколько ждать завершения обработчика прежнего подключения перед новым (п.3). */

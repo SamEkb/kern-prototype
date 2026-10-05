@@ -19,6 +19,8 @@ internal class FakeCameraRig {
     val devices: MutableList<FakeToupcamDevice> = Collections.synchronizedList(mutableListOf())
 
     @Volatile var autoStill = true
+    /** Задержка выдачи снимка после Snap (длинная выдержка), мс. */
+    @Volatile var stillDelayMs = 0L
     @Volatile var accessGate: CompletableDeferred<Unit>? = null   // ожидание USB-доступа
     @Volatile var openGate: CountDownLatch? = null                // медленное нативное открытие
     @Volatile var snapGate: CountDownLatch? = null
@@ -47,6 +49,8 @@ internal class FakeCameraRig {
     /** Кадры превью (EVENT_IMAGE) идут, как у живой камеры; false — поток кадров остановлен. */
     @Volatile var previewFrames = true
     @Volatile var frameIntervalMs = 20L
+    /** Выдержка, с которой камера уже работает при открытии (до применения профиля). */
+    @Volatile var initialExpoUs = 0
     /** Записывать отправку каждого кадра в журнал («frame<id>»). */
     @Volatile var logFrames = false
 
@@ -126,7 +130,10 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
         rig.log += "snapStart$id"
         rig.snapGate?.await(5, TimeUnit.SECONDS)
         rig.log += "snap$id"
-        if (rig.autoStill) thread { listener?.invoke(ToupcamController.EVENT_STILLIMAGE) }
+        if (rig.autoStill) thread {
+            if (rig.stillDelayMs > 0) Thread.sleep(rig.stillDelayMs)
+            listener?.invoke(ToupcamController.EVENT_STILLIMAGE)
+        }
         true
     }
 
@@ -150,7 +157,7 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
 
     private fun hr(name: String) = if (name in rig.rejectSetters) E_NOTIMPL else 0
 
-    @Volatile private var expoUs = 0
+    @Volatile private var expoUs = rig.initialExpoUs
     @Volatile private var gainPct = 0
     @Volatile private var gammaVal = 0
     @Volatile private var wb = intArrayOf(0, 0, 0)

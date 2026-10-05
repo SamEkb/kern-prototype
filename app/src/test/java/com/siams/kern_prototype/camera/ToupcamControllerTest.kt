@@ -9,6 +9,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -69,6 +70,8 @@ class ToupcamControllerTest {
         while (rig.openDevice != null && System.currentTimeMillis() < deadline) Thread.sleep(5)
         assertEquals("камера осталась открытой после release", null, rig.openDevice)
         assertEquals("нарушения единственного хэндла", emptyList<String>(), rig.violations.toList())
+        // Профили камеры — в общем DataStore процесса: сохранённое тестом не должно влиять на следующие.
+        runBlocking { CameraProfileStore(context, json).saveAll(LampType.entries.map { CameraProfile.defaultFor(it) }) }
     }
 
     /** Ожидание с пределом: зависание (например, в мутационной проверке) — явное падение теста. */
@@ -87,6 +90,86 @@ class ToupcamControllerTest {
     fun touptekDoesNotSupportFocus() {
         assertFalse(controller().capabilities.supportsFocus)
         assertEquals("P3: обозначения Touptek", ParameterTerms.TOUPTEK, controller().capabilities.terms)
+    }
+
+    /**
+     * Длинная выдержка: снимок приходит позже базового таймаута (в тестах 300 мс), но в пределах
+     * выдержки профиля с запасом — это не отказ камеры. Реальный период кадров SDK здесь не
+     * моделируется — только логика ожидания.
+     */
+    @Test
+    fun longExposureStillIsNotTimedOut() = runBlocking {
+        CameraProfileStore(context, json).save(CameraProfile.defaultFor(LampType.DAYLIGHT).copy(exposureTimeNs = 1_000_000_000L))
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.stillDelayMs = 1_100                           // выдержка 1 с + считывание
+        val f = target()
+        c.capture(f, LampType.DAYLIGHT)
+        assertTrue("снимок записан", f.length() > 0)
+        assertFalse("переподключения не было", rig.has("open2"))
+    }
+
+    /** Таймаут снимка: база + 3 × выдержка, не меньше базы и не больше 120 с. */
+    @Test
+    fun snapTimeoutScalesWithExposureWithinBounds() {
+        assertEquals("короткая выдержка — база", 15_000L, ToupcamController.snapTimeoutFor(15_000L, 100))
+        assertEquals("15 с выдержки → 15 + 45 с", 60_000L, ToupcamController.snapTimeoutFor(15_000L, 15_000_000))
+        assertEquals("верхняя граница", 120_000L, ToupcamController.snapTimeoutFor(15_000L, 60_000_000))
+        assertEquals("отрицательная — как ноль", 15_000L, ToupcamController.snapTimeoutFor(15_000L, -5))
+    }
+
+    /** Снимок дольше увеличенного ожидания — прежний отказ по таймауту с восстановлением. */
+    @Test
+    fun stillLaterThanScaledTimeoutStillTimesOut() = runBlocking {
+        CameraProfileStore(context, json).save(CameraProfile.defaultFor(LampType.DAYLIGHT).copy(exposureTimeNs = 100_000L)) // 0,1 мс
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.stillDelayMs = 1_000                           // > 300 + 3 × 0,1 мс
+        try { c.capture(target(), LampType.DAYLIGHT); fail() } catch (e: IllegalStateException) {
+            assertTrue(e.message!!, e.message!!.contains("не вернула снимок"))
+        }
+    }
+
+    /** Отказы SDK: предупреждение из отчёта текущего применения — лампа, смена лампы, успешное применение. */
+    @Test
+    fun applyWarningFollowsCurrentApplication() = runBlocking {
+        rig.rejectSetters += "WhiteBalanceGain"
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val w = c.applyWarning.value!!
+        assertEquals(LampType.DAYLIGHT, w.lampType)
+        assertEquals(mapOf("WhiteBalanceGain" to "0x80004001"), w.rejected)
+
+        c.switchLamp(LampType.UF)
+        assertEquals("предупреждение — о профиле текущей лампы", LampType.UF, c.applyWarning.value!!.lampType)
+
+        rig.rejectSetters.clear()
+        c.applyProfile(CameraProfile.defaultFor(LampType.UF))
+        assertEquals("успешное применение снимает предупреждение", null, c.applyWarning.value)
+
+        // Съёмка при отказах не блокируется.
+        rig.rejectSetters += "Gamma"
+        c.applyProfile(CameraProfile.defaultFor(LampType.UF))
+        assertEquals(setOf("Gamma"), c.applyWarning.value!!.rejected.keys)
+        val f = target()
+        c.capture(f, LampType.UF)
+        assertTrue(f.length() > 0)
+    }
+
+    /** Переподключение: предупреждение прежнего подключения не переживает его закрытие. */
+    @Test
+    fun applyWarningIsResetByReconnect() = runBlocking {
+        rig.rejectSetters += "ExpoAGain"
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        assertTrue(c.applyWarning.value != null)
+        rig.rejectSetters.clear()
+        c.recover()                                        // новое подключение, параметры приняты
+        assertTrue("новое подключение", rig.has("open2"))
+        assertEquals(null, c.applyWarning.value)
+        rig.rejectSetters += "ExpoAGain"
+        c.recover()                                        // и снова с отказом — уже нового подключения
+        assertEquals(setOf("ExpoAGain"), c.applyWarning.value!!.rejected.keys)
     }
 
     @Test
@@ -359,6 +442,177 @@ class ToupcamControllerTest {
         assertTrue("ожидался отказ по таймауту", result.isFailure)
         assertTrue(result.exceptionOrNull()!!.message!!.contains("не подтвердила новые параметры"))
         assertFalse("Snap по кадрам, пришедшим до завершения применения", rig.has("snap1"))
+    }
+
+    /**
+     * Ожидание стабилизации при длинной выдержке: после смены лампы кадры превью идут с периодом
+     * выдержки (2 с + считывание = 2,1 с); между двумя кадрами — 2,1 с, т. е. ожидание при любой фазе
+     * потока дольше прежнего фиксированного предела 2 с. Первый же
+     * запрос съёмки проходит ожидание и делает снимок по двум кадрам после применения.
+     */
+    @Test
+    fun longExposureSettleAfterLampSwitchDoesNotFailFirstCapture() = runBlocking {
+        CameraProfileStore(context, json).save(CameraProfile.defaultFor(LampType.UF).copy(exposureTimeNs = 2_000_000_000L))
+        rig.logFrames = true
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.frameIntervalMs = 2_100                        // кадр ≈ выдержка 2 с + считывание
+        val f = target()
+        c.capture(f, LampType.UF)
+        assertTrue("снимок записан", f.length() > 0)
+        assertTrue("снимок — после двух кадров нового профиля", framesBetween("expo1=2000000", "snap1") >= 2)
+    }
+
+    /** То же после смены профиля той же лампы (редактор → съёмка). */
+    @Test
+    fun longExposureSettleAfterProfileChangeDoesNotFailFirstCapture() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val long = CameraProfile.defaultFor(LampType.DAYLIGHT).copy(exposureTimeNs = 2_000_000_000L)
+        CameraProfileStore(context, json).save(long)
+        rig.frameIntervalMs = 2_100
+        c.applyProfile(long)
+        val f = target()
+        c.capture(f, LampType.DAYLIGHT)
+        assertTrue(f.length() > 0)
+    }
+
+    /**
+     * Кадр прежней длинной выдержки, ещё «в пути», приходит после применения короткой. Кадры подаются
+     * вручную: первый — через 2,3 с после применения (дольше базового предела 2 с), второй — сразу.
+     */
+    private suspend fun captureWithLateOldFrame(c: ToupcamController, lampType: LampType): Result<CaptureOutcome> =
+        coroutineScope {
+            val boundaryAt = rig.snapshot().size
+            val shot = async(Dispatchers.IO) { runCatching { c.capture(target(), lampType) } }
+            Thread.sleep(2_300)
+            assertFalse("снимок до кадров: ${rig.snapshot().drop(boundaryAt)}", rig.snapshot().drop(boundaryAt).any { it.startsWith("snap") })
+            val device = rig.devices.last()
+            repeat(2) { device.listener!!(ToupcamController.EVENT_IMAGE) }
+            withTimeout(10_000) { shot.await() }
+        }
+
+    /**
+     * После автоэкспозиции короткая выдержка, но прежняя (3 с, ручная) известна — её кадр «в пути»
+     * учитывается: снимок дожидается кадров, а не падает по базовому пределу.
+     */
+    @Test
+    fun settleAfterAutoExposureAccountsForPreviousLongExposure() = runBlocking {
+        val long = CameraProfile.defaultFor(LampType.DAYLIGHT).copy(exposureTimeNs = 3_000_000_000L)
+        CameraProfileStore(context, json).save(long)
+        val c = controller()
+        c.open(LampType.DAYLIGHT)                          // ручная 3 с — принята SDK
+        rig.previewFrames = false
+        c.autoExposure(long)                               // AE: 1 мс, заморожено
+        val result = captureWithLateOldFrame(c, LampType.DAYLIGHT)
+        assertTrue("снимок после кадра прежней выдержки: ${result.exceptionOrNull()}", result.isSuccess)
+    }
+
+    /**
+     * Новое подключение: выдержка, с которой камера уже работает (3 с), прочитана из SDK до
+     * применения профиля — её кадр «в пути» учитывается.
+     */
+    @Test
+    fun settleOnNewConnectionAccountsForCameraExposureBeforeProfile() = runBlocking {
+        rig.initialExpoUs = 3_000_000
+        val c = controller()
+        rig.previewFrames = false
+        c.open(LampType.DAYLIGHT)                          // профиль по умолчанию — короткая выдержка
+        val result = captureWithLateOldFrame(c, LampType.DAYLIGHT)
+        assertTrue("снимок после кадра прежней выдержки: ${result.exceptionOrNull()}", result.isSuccess)
+    }
+
+    /**
+     * Отклонённый сеттер выдержки не меняет выдержку камеры (как в подменной камере) — последняя
+     * известная (3 с) сохраняется и учитывается при следующем применении.
+     */
+    @Test
+    fun rejectedExposureSetterKeepsLastKnownExposure() = runBlocking {
+        CameraProfileStore(context, json).save(CameraProfile.defaultFor(LampType.DAYLIGHT).copy(exposureTimeNs = 3_000_000_000L))
+        val c = controller()
+        c.open(LampType.DAYLIGHT)                          // 3 с — принята
+        rig.rejectSetters += "ExpoTime"
+        c.applyProfile(CameraProfile.defaultFor(LampType.DAYLIGHT)) // короткая — отклонена
+        rig.rejectSetters.clear()
+        rig.previewFrames = false
+        val result = captureWithLateOldFrame(c, LampType.UF)       // УФ: короткая, принята
+        assertTrue("снимок после кадра прежней выдержки: ${result.exceptionOrNull()}", result.isSuccess)
+    }
+
+    /** Отсутствие кадров при длинной выдержке — по-прежнему ошибка, но после увеличенного предела. */
+    @Test
+    fun missingFramesWithLongExposureFailAfterScaledLimit() = runBlocking {
+        CameraProfileStore(context, json).save(CameraProfile.defaultFor(LampType.UF).copy(exposureTimeNs = 1_000_000_000L))
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.previewFrames = false
+        val started = System.currentTimeMillis()
+        try { c.capture(target(), LampType.UF); fail() } catch (e: IllegalStateException) {
+            assertTrue(e.message!!, e.message!!.contains("нет кадров превью 5 с"))   // 2 + 3 × 1 с
+        }
+        val elapsed = System.currentTimeMillis() - started
+        assertTrue("ждали предел, а не прежние 2 с: $elapsed мс", elapsed >= 5_000)
+        assertFalse(rig.has("snap1"))
+    }
+
+    /** Отмена во время длинного ожидания стабилизации срабатывает сразу, не по пределу. */
+    @Test
+    fun longSettleWaitIsCancelledPromptly() = runBlocking {
+        CameraProfileStore(context, json).save(CameraProfile.defaultFor(LampType.UF).copy(exposureTimeNs = 15_000_000_000L))
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.previewFrames = false
+        val shot = async(Dispatchers.IO) { runCatching { c.capture(target(), LampType.UF) } }
+        assertTrue(rig.waitFor("expo1=15000000"))         // УФ применён, ожидание кадров идёт (предел 47 с)
+        Thread.sleep(200)
+        val cancelledAt = System.currentTimeMillis()
+        shot.cancel()
+        runCatching { shot.awaitWithin(1_000) }
+        assertTrue("отмена не ждёт предела", System.currentTimeMillis() - cancelledAt < 1_000)
+        assertFalse(rig.has("snap1"))
+    }
+
+    /**
+     * Отказ сеттера выдержки: действующая выдержка неизвестна (отправленная могла не примениться) —
+     * ожидание до верхней границы; съёмка при отказах разрешена и проходит при редких кадрах.
+     */
+    @Test
+    fun rejectedExposureSetterWaitsUpToUpperBound() = runBlocking {
+        rig.rejectSetters += "ExpoTime"
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.frameIntervalMs = 2_100                        // фактическая выдержка неизвестна и велика
+        val f = target()
+        c.capture(f, LampType.UF)
+        assertTrue("снимок при отказе сеттера не заблокирован", f.length() > 0)
+        assertEquals(setOf("ExpoTime"), c.applyWarning.value!!.rejected.keys)
+    }
+
+    /** Предел ожидания стабилизации: от выдержки (новой и прежней), с границами. */
+    @Test
+    fun settleTimeoutScalesWithExposureWithinBounds() {
+        assertEquals("короткая выдержка — 2 с", 2_000L, ToupcamController.settleTimeoutFor(100, 100))
+        assertEquals("2 с → 2 + 3 × 2 с", 8_000L, ToupcamController.settleTimeoutFor(2_000_000, 1_000))
+        assertEquals("прежняя длиннее — по прежней", 11_000L, ToupcamController.settleTimeoutFor(1_000, 3_000_000))
+        assertEquals("прежняя неизвестна — по новой", 5_000L, ToupcamController.settleTimeoutFor(1_000_000, null))
+        assertEquals("верхняя граница", 60_000L, ToupcamController.settleTimeoutFor(30_000_000, null))
+        assertEquals("новая неизвестна — верхняя граница", 60_000L, ToupcamController.settleTimeoutFor(null, 1_000))
+        assertEquals("отрицательная — как ноль", 2_000L, ToupcamController.settleTimeoutFor(-5, null))
+        assertEquals("снимок: выдержка неизвестна — верхняя граница", 120_000L, ToupcamController.snapTimeoutFor(15_000L, null))
+    }
+
+    /** Какая выдержка считается действующей: только принятая SDK вместе с отключением авто. */
+    @Test
+    fun knownExposureIgnoresRejectedExposureSetters() {
+        fun report(vararg rejected: String) = ToupcamProfileApplier.ApplyReport(
+            exposureUs = 500_000, gainPercent = 100, wbGain = listOf(0, 0, 0), gamma = 100,
+            rejected = rejected.associateWith { "0x80004001" },
+        )
+        assertEquals(500_000L, ToupcamController.knownExposureUs(report()))
+        assertEquals("отказ другого сеттера не влияет", 500_000L, ToupcamController.knownExposureUs(report("WhiteBalanceGain")))
+        assertEquals(null, ToupcamController.knownExposureUs(report("ExpoTime")))
+        assertEquals("авто не отключено — выдержку задаёт AE", null, ToupcamController.knownExposureUs(report("AutoExpoEnable")))
+        assertEquals("отчёта нет", null, ToupcamController.knownExposureUs(null))
     }
 
     @Test

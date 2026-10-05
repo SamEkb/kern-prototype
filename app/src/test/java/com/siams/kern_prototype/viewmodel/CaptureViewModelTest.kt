@@ -209,4 +209,22 @@ class CaptureViewModelTest {
         val layers = repo.getDrillingContent(vm.drillingId)!!.tables.single().layers
         assertEquals("отметка соответствует записанному слою", listOf(LampType.DAYLIGHT), layers.map { it.lampType })
     }
+
+    /** R04: признак «снимок текущей лампы уже отправлялся» — для предупреждения в HUD. */
+    @Test
+    fun currentLampOnServerFollowsTableAndLamp() = runBlocking {
+        val camera = SlowCamera()
+        val vm = newVm(camera)
+        onMain { vm.capture() }
+        withTimeout(3_000) { camera.started.await() }
+        camera.release.complete(Unit)
+        waitUntil { vm.capturedLamps.value == setOf(LampType.DAYLIGHT) }
+        assertFalse("ещё не отправлялся", vm.currentLampOnServer.value)
+
+        val layer = repo.getDrillingContent(vm.drillingId)!!.tables.single().layers.single()
+        db.layerDao().setRemoteImageId(layer.id, layer.filePath, "img-1")
+        waitUntil { vm.currentLampOnServer.value }
+        onMain { vm.switchLamp(LampType.UF) }
+        waitUntil { !vm.currentLampOnServer.value }               // УФ этого стола не отправлялся
+    }
 }

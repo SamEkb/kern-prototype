@@ -101,6 +101,9 @@ class CameraProfilesViewModel @Inject constructor(
     /** R14: границы текущей камеры — те же, что использует применение профиля. */
     val limits: StateFlow<com.siams.kern_prototype.camera.CameraLimits> = controller.limits
 
+    /** Отказы SDK при применении профиля — предупреждение. */
+    val applyWarning: StateFlow<com.siams.kern_prototype.camera.ApplyWarning?> = controller.applyWarning
+
     /** FIXES §3: возможности активной камеры (для показа параметров). */
     val capabilities: com.siams.kern_prototype.camera.CameraCapabilities get() = controller.capabilities
 

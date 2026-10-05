@@ -4,7 +4,6 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
-import com.siams.kern_prototype.di.DatabaseModule
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -201,7 +200,7 @@ class KernMigrationsTest {
                    VALUES ('d1', 'Д', '{}', 1, 'NOT_SENT', 0, 0)""",
             )
         }
-        val room = DatabaseModule.provideDatabase(context)
+        val room = DatabaseGate.buildDatabase(context)
         try {
             runBlocking { assertNotNull(room.drillingDao().getById("d1")) }
         } finally {
@@ -221,7 +220,7 @@ class KernMigrationsTest {
             db.version = 2
         }
         try {
-            DatabaseModule.provideDatabase(context).openHelper.writableDatabase
+            DatabaseGate.buildDatabase(context).openHelper.writableDatabase
             fail("обновление v2 должно быть остановлено")
         } catch (e: IllegalStateException) {
             assertTrue(e.message!!.contains("версии 2"))
@@ -265,7 +264,7 @@ class KernMigrationsTest {
         assertTrue("предусловие: данные в WAL", File(target.path + "-wal").length() > 0)
 
         try {
-            DatabaseModule.provideDatabase(context).openHelper.writableDatabase
+            DatabaseGate.buildDatabase(context).openHelper.writableDatabase
             fail("обновление v2 должно быть остановлено")
         } catch (e: IllegalStateException) {
             assertTrue(e.message!!, e.message!!.contains("версии 2"))
@@ -286,7 +285,7 @@ class KernMigrationsTest {
 
         repeat(2) { attempt ->
             try {
-                DatabaseModule.provideDatabase(context).openHelper.writableDatabase
+                DatabaseGate.buildDatabase(context).openHelper.writableDatabase
                 fail("попытка ${attempt + 1}: повреждённая БД не должна открываться")
             } catch (e: IllegalStateException) {
                 assertTrue(e.message!!, e.message!!.contains("повреждён"))
@@ -302,7 +301,7 @@ class KernMigrationsTest {
         // Каталог копий занят файлом → копию не сохранить.
         File(context.filesDir, "db_backup").apply { deleteRecursively(); writeText("x") }
         try {
-            DatabaseModule.provideDatabase(context)
+            DatabaseGate.buildDatabase(context)
             fail("без копии обновление должно быть остановлено")
         } catch (e: IllegalStateException) {
             assertTrue(e.message!!.contains("копию"))

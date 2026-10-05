@@ -44,6 +44,12 @@ interface KernCamera {
      */
     val limits: StateFlow<CameraLimits> get() = FALLBACK_LIMITS
 
+    /**
+     * Отказы SDK при применении профиля к ТЕКУЩЕМУ подключению (null — отказов нет или профиль
+     * ещё не применён). Предупреждение для оператора; съёмку не блокирует.
+     */
+    val applyWarning: StateFlow<ApplyWarning?> get() = NO_APPLY_WARNING
+
     /** FIXES §3: возможности камеры для интерфейса. По умолчанию — без фокуса. */
     val capabilities: CameraCapabilities get() = CameraCapabilities()
 
@@ -114,3 +120,8 @@ private val FALLBACK_LIMITS: StateFlow<CameraLimits> =
 
 /** R22: принятый эталон FFC — путь к шаблону и отчёт проверки качества. */
 data class FfcReference(val path: String, val quality: FfcQuality.Report)
+
+/** Отклонённые SDK сеттеры (имя → HRESULT) при применении профиля лампы [lampType]. */
+data class ApplyWarning(val lampType: LampType, val rejected: Map<String, String>)
+
+private val NO_APPLY_WARNING: StateFlow<ApplyWarning?> = kotlinx.coroutines.flow.MutableStateFlow(null)

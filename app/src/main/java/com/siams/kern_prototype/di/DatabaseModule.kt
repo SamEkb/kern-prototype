@@ -1,17 +1,13 @@
 package com.siams.kern_prototype.di
 
-import android.content.Context
-import androidx.room.Room
-import com.siams.kern_prototype.data.db.DatabaseBackup
+import com.siams.kern_prototype.data.db.DatabaseGate
 import com.siams.kern_prototype.data.db.KernDatabase
-import com.siams.kern_prototype.data.db.KernMigrations
 import com.siams.kern_prototype.data.db.dao.DrillingDao
 import com.siams.kern_prototype.data.db.dao.LayerDao
 import com.siams.kern_prototype.data.db.dao.TableDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
-import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
@@ -19,18 +15,13 @@ import javax.inject.Singleton
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
 
+    /**
+     * БД — только через [DatabaseGate]: недоступная БД не выдаётся (исключение), пустая или
+     * подменная не создаётся. Точки входа (экран, старт, воркер) проверяют шлюз заранее.
+     */
     @Provides
     @Singleton
-    fun provideDatabase(@ApplicationContext context: Context): KernDatabase {
-        // R07: перед обновлением схемы — копия файла БД; без копии или для версии без
-        // миграции обновление останавливается (исключение), архив не изменяется.
-        DatabaseBackup.prepareForOpen(context, KernDatabase.NAME, KernDatabase.VERSION)
-        // Разрушительного fallback нет ни для одной версии: без миграции Room откажется
-        // открывать БД, а не удалит её.
-        return Room.databaseBuilder(context, KernDatabase::class.java, KernDatabase.NAME)
-            .addMigrations(*KernMigrations.ALL)
-            .build()
-    }
+    fun provideDatabase(gate: DatabaseGate): KernDatabase = gate.requireDatabase()
 
     @Provides fun provideDrillingDao(db: KernDatabase): DrillingDao = db.drillingDao()
     @Provides fun provideTableDao(db: KernDatabase): TableDao = db.tableDao()

@@ -20,7 +20,9 @@ import javax.inject.Inject
 class KernApplication : Application(), Configuration.Provider {
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
-    @Inject lateinit var syncManager: SyncManager
+    // Зависит от БД — лениво: при недоступной БД не создаётся (старт не падает).
+    @Inject lateinit var syncManager: dagger.Lazy<SyncManager>
+    @Inject lateinit var databaseGate: com.siams.kern_prototype.data.db.DatabaseGate
     @Inject lateinit var serverSettings: com.siams.kern_prototype.data.settings.ServerSettingsStore
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -29,7 +31,7 @@ class KernApplication : Application(), Configuration.Provider {
         super.onCreate()
         // R05: снять «зависшие» SENDING без активной задачи отправки (до действий пользователя).
         // Согласовано с постановкой в отправку общим замком SyncManager (не «до действий пользователя»).
-        appScope.launch { runCatching { syncManager.reconcileStuck() } }
+        appScope.launch { reconcileIfDatabaseReady(databaseGate) { syncManager.get().reconcileStuck() } }
         // R20: открытый пароль прежней версии → зашифрованное хранилище (до переноса он продолжает работать).
         appScope.launch {
             runCatching { serverSettings.migrateLegacyPassword() }
@@ -41,4 +43,20 @@ class KernApplication : Application(), Configuration.Provider {
         get() = Configuration.Builder()
             .setWorkerFactory(workerFactory)
             .build()
+}
+
+/**
+ * Сверка «зависших» отправок при старте — только с доступной БД; иначе пропускается (экран ошибки
+ * БД покажет причину). Возвращает true, если сверка выполнялась.
+ */
+internal suspend fun reconcileIfDatabaseReady(
+    gate: com.siams.kern_prototype.data.db.DatabaseGate,
+    reconcile: suspend () -> Unit,
+): Boolean {
+    if (gate.open() !is com.siams.kern_prototype.data.db.DatabaseGate.State.Ready) {
+        runCatching { android.util.Log.w("KernApplication", "База данных недоступна — сверка отправок пропущена") }
+        return false
+    }
+    runCatching { reconcile() }
+    return true
 }

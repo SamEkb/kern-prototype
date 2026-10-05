@@ -52,6 +52,7 @@ import com.siams.kern_prototype.ui.theme.Gray40
 import com.siams.kern_prototype.ui.theme.Orange30
 import com.siams.kern_prototype.ui.theme.Ink
 import com.siams.kern_prototype.ui.theme.KernTheme
+import com.siams.kern_prototype.data.hasServerCopy
 import com.siams.kern_prototype.ui.components.AdaptiveSplit
 import com.siams.kern_prototype.ui.theme.KernTokens
 import com.siams.kern_prototype.ui.theme.Red30
@@ -93,6 +94,9 @@ fun TableViewScreen(
     var showEditNumber by remember { mutableStateOf(false) }
     var showDeleteTable by remember { mutableStateOf(false) }
     var pendingDeleteLayer by remember { mutableStateOf<String?>(null) }
+    // Пересъёмка уже отправленного слоя — сначала предупреждение о сервере (R04).
+    var pendingReshoot by remember { mutableStateOf<LampType?>(null) }
+    val reshoot = { lamp: LampType -> vm.flush(leaving = false) { onReshoot(drillingId, lamp.name) } }
 
     Scaffold(
         containerColor = Ink,
@@ -156,14 +160,14 @@ fun TableViewScreen(
                 label = stringResource(R.string.common_daylight),
                 present = daylight != null,
                 labelColor = Color.White,
-                onReshoot = { vm.flush(leaving = false) { onReshoot(drillingId, LampType.DAYLIGHT.name) } },
+                onReshoot = { if (daylight?.hasServerCopy() == true) pendingReshoot = LampType.DAYLIGHT else reshoot(LampType.DAYLIGHT) },
                 onDelete = daylight?.let { { pendingDeleteLayer = it.id } },
             )
             LayerRow(
                 label = stringResource(R.string.common_uf),
                 present = uf != null,
                 labelColor = UvYellow,
-                onReshoot = { vm.flush(leaving = false) { onReshoot(drillingId, LampType.UF.name) } },
+                onReshoot = { if (uf?.hasServerCopy() == true) pendingReshoot = LampType.UF else reshoot(LampType.UF) },
                 onDelete = uf?.let { { pendingDeleteLayer = it.id } },
             )
 
@@ -208,13 +212,31 @@ fun TableViewScreen(
         AlertDialog(
             onDismissRequest = { pendingDeleteLayer = null },
             title = { Text(stringResource(R.string.table_view_delete_layer_title)) },
-            text = { Text(stringResource(R.string.table_view_delete_layer_message)) },
+            text = {
+                val onServer = t?.layers?.firstOrNull { it.id == layerId }?.hasServerCopy() == true
+                Text(
+                    stringResource(R.string.table_view_delete_layer_message) +
+                        if (onServer) "\n\n" + stringResource(R.string.sent_layer_delete_note) else "",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { vm.deleteLayer(layerId); pendingDeleteLayer = null }) {
                     Text(stringResource(R.string.common_delete), color = Red30)
                 }
             },
             dismissButton = { TextButton(onClick = { pendingDeleteLayer = null }) { Text(stringResource(R.string.common_cancel)) } },
+        )
+    }
+
+    pendingReshoot?.let { lamp ->
+        AlertDialog(
+            onDismissRequest = { pendingReshoot = null },
+            title = { Text(stringResource(R.string.sent_layer_reshoot_title)) },
+            text = { Text(stringResource(R.string.sent_layer_reshoot_message)) },
+            confirmButton = {
+                TextButton(onClick = { pendingReshoot = null; reshoot(lamp) }) { Text(stringResource(R.string.sent_layer_reshoot_confirm)) }
+            },
+            dismissButton = { TextButton(onClick = { pendingReshoot = null }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
 }

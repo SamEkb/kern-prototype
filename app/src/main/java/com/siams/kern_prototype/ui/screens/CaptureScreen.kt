@@ -50,6 +50,7 @@ import com.siams.kern_prototype.domain.model.LampType
 import com.siams.kern_prototype.ui.components.rememberMovableCameraPreview
 import com.siams.kern_prototype.ui.components.CameraScreenLayout
 import com.siams.kern_prototype.ui.components.LampSwitch
+import com.siams.kern_prototype.ui.components.applyWarningText
 import com.siams.kern_prototype.ui.theme.Body2Bold
 import com.siams.kern_prototype.ui.theme.Body3
 import com.siams.kern_prototype.ui.theme.Body4
@@ -87,6 +88,8 @@ fun CaptureScreen(
     val capturing by vm.capturing.collectAsStateWithLifecycle()
     val profile by vm.activeProfile.collectAsStateWithLifecycle()
     val cameraState by vm.cameraState.collectAsStateWithLifecycle()
+    val applyWarning by vm.applyWarning.collectAsStateWithLifecycle()
+    val currentLampOnServer by vm.currentLampOnServer.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     // Системный «Назад» во время снимка не закрывает экран (кадр не должен потеряться).
     androidx.activity.compose.BackHandler(enabled = capturing) {}
@@ -110,6 +113,10 @@ fun CaptureScreen(
         // FIXES §6: отметка «снят» — на переключателе освещения; здесь только номер стола.
         Text(stringResource(R.string.table_number, tableNumber), style = Body2Bold, color = Color.White)
         Text(profileLine(profile, vm.controller.capabilities), style = Body4, color = Color.White.copy(alpha = 0.85f))
+        // Отказы SDK при применении профиля к текущему подключению — предупреждение, не блокировка.
+        applyWarning?.let { Text(applyWarningText(it), style = Body4, color = Orange30) }
+        // R04: пересъёмка уже отправленного снимка не заменит его на сервере.
+        if (currentLampOnServer) Text(stringResource(R.string.capture_reshoot_sent_hint), style = Body4, color = Orange30)
         if (!manualSupported) {
             Text(
                 stringResource(R.string.capture_manual_unsupported),

@@ -57,6 +57,7 @@ import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.ui.components.rememberMovableCameraPreview
 import com.siams.kern_prototype.ui.components.CameraScreenLayout
 import com.siams.kern_prototype.ui.components.LampSwitch
+import com.siams.kern_prototype.ui.components.applyWarningText
 import com.siams.kern_prototype.ui.theme.Blue
 import com.siams.kern_prototype.ui.theme.Body2Bold
 import com.siams.kern_prototype.ui.theme.Body3Bold
@@ -100,6 +101,7 @@ fun CameraProfilesScreen(
     val showFfcInstruction by vm.showFfcInstruction.collectAsStateWithLifecycle()
     val showImportWarning by vm.showImportWarning.collectAsStateWithLifecycle()
     val cameraState by vm.cameraState.collectAsStateWithLifecycle()
+    val applyWarning by vm.applyWarning.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     val dirty by vm.dirty.collectAsStateWithLifecycle()
     val exitPrompt by vm.exitPrompt.collectAsStateWithLifecycle()
@@ -246,6 +248,8 @@ fun CameraProfilesScreen(
         }
         Text(lastModifiedLabel(saved.lastModifiedAt), style = Body4, color = Gray40)
 
+        // Отказы SDK при применении профиля к текущему подключению — предупреждение, не блокировка.
+        applyWarning?.let { Text(applyWarningText(it), style = Body4, color = Orange30) }
         if (!manualSupported) {
             Text(
                 "⚠ Ручной режим (MANUAL_SENSOR) не поддерживается — превью может не меняться (§6.1).",

@@ -216,7 +216,8 @@ fun SendQueueScreen(
         AlertDialog(
             onDismissRequest = { confirmClear = false },
             title = { Text(stringResource(R.string.send_queue_clear_title)) },
-            text = { Text(stringResource(R.string.send_queue_clear_message, sent)) },
+            // R04/R06: «Отправлено» не доказывает полноту архива на сервере.
+            text = { Text(stringResource(R.string.send_queue_clear_message, sent) + "\n\n" + stringResource(R.string.send_queue_clear_note)) },
             confirmButton = {
                 TextButton(onClick = { vm.clearSent(); confirmClear = false }) {
                     Text(stringResource(R.string.common_clear), color = Red30)
