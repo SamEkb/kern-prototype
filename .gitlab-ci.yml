@@ -1,48 +1,31 @@
 # CI проекта: сборка, юнит-тесты и lint — те же проверки, что локально.
 # Наличие этого файла отключает Auto DevOps (его Heroku/Docker-задачи раннеру не подходят).
 # Окружение (JDK 21, Android SDK/NDK) готовит ci/setup-android.sh — с кешем на раннере.
-
-stages:
-  - build
-  - test
+#
+# Одна задача, а не три: раннер (custom executor) запускает задачи проекта в одной и той же папке,
+# параллельные задачи стирали друг другу app/build/. Так проект и компилируется один раз.
 
 variables:
   # Без фонового демона: процесс Gradle не остаётся на раннере после задачи.
   GRADLE_OPTS: "-Dorg.gradle.daemon=false"
 
-default:
-  interruptible: true
+check:
+  # Чистая сборка с тестами дольше 5 минут; фактический предел ограничен ещё и настройками раннера.
+  timeout: 30 minutes
   before_script:
     - source ci/setup-android.sh
-
-assemble:
-  stage: build
   script:
-    - ./gradlew :app:assembleDebug --stacktrace
-  artifacts:
-    paths:
-      - app/build/outputs/apk/debug/app-debug.apk
-    expire_in: 1 week
-
-unit-tests:
-  stage: test
-  script:
-    - ./gradlew :app:testDebugUnitTest --stacktrace
+    # Kotlin-компилятор — внутри процесса Gradle: общий Kotlin-демон раннера не делится между сборками.
+    # --continue: lint и тесты выполняются, даже если упало другое.
+    - ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+      --continue --stacktrace -Pkotlin.compiler.execution.strategy=in-process
   artifacts:
     when: always
     reports:
       junit: app/build/test-results/testDebugUnitTest/TEST-*.xml
     paths:
+      - app/build/outputs/apk/debug/app-debug.apk
       - app/build/reports/tests/testDebugUnitTest/
-    expire_in: 1 week
-
-lint:
-  stage: test
-  script:
-    - ./gradlew :app:lintDebug --stacktrace
-  artifacts:
-    when: always
-    paths:
       - app/build/reports/lint-results-debug.html
       - app/build/reports/lint-results-debug.xml
     expire_in: 1 week
