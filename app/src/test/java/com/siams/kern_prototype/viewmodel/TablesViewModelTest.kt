@@ -119,7 +119,7 @@ class TablesViewModelTest {
         val done = AtomicInteger()
         onMain { vm.deleteTables(tableIds.toSet()) { done.incrementAndGet() } }
         waitUntil { vm.message.value != null }
-        assertTrue(vm.message.value!!, vm.message.value!!.contains("ничего не удалено"))
+        assertTrue(vm.message.value!!, vm.message.value!!.contains("Не удалось завершить удаление"))
         assertEquals("выбор не снимается — onDeleted не вызван", 0, done.get())
         assertEquals("столы целы", 2, tablesLeft())
         assertTrue("файлы целы", photos.all { it.exists() })
@@ -148,7 +148,7 @@ class TablesViewModelTest {
         }
         onMain { vm.deleteTable() }
         waitUntil { vm.message.value != null }
-        assertTrue(vm.message.value!!, vm.message.value!!.contains("ничего не удалено"))
+        assertTrue(vm.message.value!!, vm.message.value!!.contains("Не удалось завершить удаление"))
         assertFalse("экран стола не закрывается", vm.closed.value)
         assertNotNull(runBlocking { db.tableDao().getById(tableIds[0]) })
         assertTrue("приложение не падает: ${crashes.firstOrNull()}", crashes.isEmpty())

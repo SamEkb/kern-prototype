@@ -33,6 +33,8 @@ internal class FakeCameraRig {
     @Volatile var tempTintHr: Int = 0x80004001.toInt()
     /** 5k: события SDK, которые камера шлёт после включения авто-AE / запуска AWB (поток SDK). */
     @Volatile var aeEvents: List<Int> = emptyList()
+    /** Вызовы коррекции FFC снимка (applyFlatField). */
+    val flatFieldCalls = AtomicInteger()
     @Volatile var awbEvents: List<Int> = emptyList()
     /** События, которые камера шлёт синхронно (разово) при первом выключении авто-AE во время AE. */
     @Volatile var aeOffEvents: List<Int> = emptyList()
@@ -153,7 +155,10 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
         true
     }
 
-    override fun applyFlatField(still: Bitmap, template: Bitmap) = true // без хэндла
+    override fun applyFlatField(still: Bitmap, template: Bitmap): Boolean { // без хэндла
+        rig.flatFieldCalls.incrementAndGet()
+        return true
+    }
 
     private fun hr(name: String) = if (name in rig.rejectSetters) E_NOTIMPL else 0
 

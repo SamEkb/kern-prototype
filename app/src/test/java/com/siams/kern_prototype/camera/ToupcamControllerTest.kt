@@ -1114,6 +1114,30 @@ class ToupcamControllerTest {
         assertEquals(listOf("start", "applied", "pulled", "template", "quality", "end:ok"), c.lastFfcMemory!!.phases.map { it.name })
     }
 
+    /** §2.3: эталон в профиле — снимок корректируется; эталон удалён (пустой путь) — без коррекции. */
+    @Test
+    fun captureAppliesFfcOnlyWhileProfileHasTemplate() = runBlocking {
+        val store = CameraProfileStore(context, json)
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val ref = c.captureFfcReference(LampType.DAYLIGHT)
+        // Сохранённый профиль применяется к подключению (как после «Сохранить» / при открытии камеры).
+        val withFfc = store.read(LampType.DAYLIGHT).copy(ffcTemplatePath = ref.path)
+        store.save(withFfc)
+        c.applyProfile(withFfc)
+        c.capture(target(), LampType.DAYLIGHT)
+        assertEquals("с эталоном — коррекция", 1, rig.flatFieldCalls.get())
+
+        val withoutFfc = withFfc.copy(ffcTemplatePath = "")
+        store.save(withoutFfc)
+        c.applyProfile(withoutFfc)
+        val f = target()
+        c.capture(f, LampType.DAYLIGHT)
+        assertEquals("без эталона коррекции нет", 1, rig.flatFieldCalls.get())
+        assertTrue(f.length() > 0)
+        assertTrue("файл эталона остаётся (R11)", File(ref.path).exists())
+    }
+
     /** R22: непригодный эталон (пересвет, тёмный, неравномерный) отклоняется, файл не создаётся. */
     @Test
     fun unfitFfcReferencesAreRejectedWithoutWritingAFile() = runBlocking {

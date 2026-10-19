@@ -69,9 +69,9 @@ class TablesViewModel @Inject constructor(
             } catch (e: IllegalStateException) {
                 _message.value = e.message ?: failure
             } catch (e: Exception) {
-                // Ошибка до фиксации транзакции (deleteInTransaction): записи и файлы не тронуты.
+                // Откат гарантирован не для любой ошибки — без обещания «ничего не удалено».
                 runCatching { Log.w("TablesViewModel", failure, e) }
-                _message.value = "$failure — ничего не удалено. Повторите попытку."
+                _message.value = "Не удалось завершить удаление. Проверьте список и повторите попытку."
             }
         }
     }
