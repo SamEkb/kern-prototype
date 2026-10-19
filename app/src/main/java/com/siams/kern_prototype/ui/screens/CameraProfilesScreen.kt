@@ -59,9 +59,11 @@ import com.siams.kern_prototype.ui.components.CameraScreenLayout
 import com.siams.kern_prototype.ui.components.LampSwitch
 import com.siams.kern_prototype.ui.components.applyWarningText
 import com.siams.kern_prototype.ui.theme.Blue
+import com.siams.kern_prototype.ui.theme.Blue40
 import com.siams.kern_prototype.ui.theme.Body2Bold
 import com.siams.kern_prototype.ui.theme.Body3Bold
 import com.siams.kern_prototype.ui.theme.Body4
+import com.siams.kern_prototype.ui.theme.Gray30
 import com.siams.kern_prototype.ui.theme.Gray40
 import com.siams.kern_prototype.ui.theme.Ink
 import com.siams.kern_prototype.ui.theme.KernTheme
@@ -100,6 +102,8 @@ fun CameraProfilesScreen(
     val autoProc by vm.autoProc.collectAsStateWithLifecycle()
     val showFfcInstruction by vm.showFfcInstruction.collectAsStateWithLifecycle()
     val showImportWarning by vm.showImportWarning.collectAsStateWithLifecycle()
+    val ffcRejection by vm.ffcRejection.collectAsStateWithLifecycle()
+    val showFfcRemove by vm.showFfcRemove.collectAsStateWithLifecycle()
     val cameraState by vm.cameraState.collectAsStateWithLifecycle()
     val applyWarning by vm.applyWarning.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
@@ -219,15 +223,25 @@ fun CameraProfilesScreen(
                 modifier = Modifier.weight(1f),
             ) { Text("Автобаланс") }
         }
-        OutlinedButton(
-            onClick = vm::requestFfc,
-            enabled = !busy && cameraReady && manualSupported,
+        val hasFfc = profile.ffcTemplatePath.isNotBlank()
+        Row(
             modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
         ) {
-            Text(if (profile.ffcTemplatePath.isNotBlank()) "Переснять эталон (FFC)" else "Коррекция освещения (FFC)")
+            OutlinedButton(
+                onClick = vm::requestFfc,
+                enabled = !busy && cameraReady && manualSupported,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(if (hasFfc) "Переснять эталон (FFC)" else "Коррекция освещения (FFC)")
+            }
+            // Удаление не требует камеры — только правка черновика профиля.
+            if (hasFfc) {
+                OutlinedButton(onClick = vm::requestFfcRemove, enabled = !busy) { Text("Удалить эталон") }
+            }
         }
-        if (profile.ffcTemplatePath.isNotBlank()) {
-            Text("Эталон FFC снят ✓ — применяется к снимкам", style = Body4, color = Blue)
+        if (hasFfc) {
+            Text("Эталон FFC снят ✓ — применяется к снимкам", style = Body4, color = Blue40)
         }
         if (busy) {
             Row(
@@ -246,7 +260,7 @@ fun CameraProfilesScreen(
                 )
             }
         }
-        Text(lastModifiedLabel(saved.lastModifiedAt), style = Body4, color = Gray40)
+        Text(lastModifiedLabel(saved.lastModifiedAt), style = Body4, color = Gray30)
 
         // Отказы SDK при применении профиля к текущему подключению — предупреждение, не блокировка.
         applyWarning?.let { Text(applyWarningText(it), style = Body4, color = Orange30) }
@@ -336,7 +350,8 @@ fun CameraProfilesScreen(
                     .statusBarsPadding()
                     .fillMaxWidth()
                     .padding(KernTokens.spaceMd)
-                    .background(Ink.copy(alpha = 0.5f), KernTokens.radiusCard)
+                    // Плотнее, чем было (0.5): нижние строки панели ложатся на светлое превью.
+                    .background(Ink.copy(alpha = 0.8f), KernTokens.radiusCard)
                     .padding(KernTokens.spaceMd),
                 verticalArrangement = Arrangement.spacedBy(KernTokens.spaceSm),
                 content = top,
@@ -372,6 +387,8 @@ fun CameraProfilesScreen(
             showFfcInstruction = showFfcInstruction,
             exitPrompt = exitPrompt,
             showImportWarning = showImportWarning,
+            ffcRejection = ffcRejection,
+            showFfcRemove = showFfcRemove,
             actions = ProfileEditorDialogActions(
                 confirmSave = vm::confirmSave,
                 dismissWarning = vm::dismissWarning,
@@ -382,6 +399,10 @@ fun CameraProfilesScreen(
                 cancelExit = vm::cancelExit,
                 confirmImport = vm::confirmImport,
                 dismissImport = vm::dismissImport,
+                retryFfc = vm::retryFfc,
+                dismissFfcRejection = vm::dismissFfcRejection,
+                confirmFfcRemove = vm::confirmFfcRemove,
+                dismissFfcRemove = vm::dismissFfcRemove,
             ),
         ),
     )

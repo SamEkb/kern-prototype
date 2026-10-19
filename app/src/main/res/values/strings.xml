@@ -30,6 +30,15 @@
     <string name="tables_passport_cd">Паспорт</string>
     <string name="tables_capture">Снимать</string>
     <string name="tables_empty">Нет столов. Нажмите «Снимать».</string>
+    <string name="tables_selected">Выбрано: %1$d</string>
+    <string name="tables_selected_cd">Выбран</string>
+    <string name="tables_selection_cancel_cd">Отменить выбор</string>
+    <string name="tables_delete_selected_cd">Удалить выбранные столы</string>
+    <string name="tables_delete_title">Удалить выбранные столы?</string>
+    <string name="tables_delete_message">Выбрано столов: %1$d. Они будут удалены со всеми слоями безвозвратно.</string>
+    <string name="tables_delete_numbers">Столы: %1$s</string>
+    <string name="tables_delete_more">и ещё %1$d</string>
+    <string name="tables_delete_sent_note">Среди них есть снимки, которые уже отправлялись на S900. Удаление выполняется только на этом устройстве: удалить снимки на сервере приложение пока не может. Состояние проекта на S900 проверьте вручную.</string>
     <string name="table_number">Стол №%1$s</string>
 
     <!-- Просмотр стола -->

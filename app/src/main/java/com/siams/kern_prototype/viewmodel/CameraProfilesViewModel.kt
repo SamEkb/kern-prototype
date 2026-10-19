@@ -3,6 +3,7 @@ package com.siams.kern_prototype.viewmodel
 import android.graphics.SurfaceTexture
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.siams.kern_prototype.camera.FfcQuality
 import com.siams.kern_prototype.camera.FfcReference
 import com.siams.kern_prototype.camera.CameraControllerState
 import com.siams.kern_prototype.camera.KernCamera
@@ -82,6 +83,14 @@ class CameraProfilesViewModel @Inject constructor(
     // §2.3: показать инструкцию перед съёмкой эталона FFC.
     private val _showFfcInstruction = MutableStateFlow(false)
     val showFfcInstruction: StateFlow<Boolean> = _showFfcInstruction.asStateFlow()
+
+    /** R22: отчёт об отклонённом эталоне FFC — полный текст причин в диалоге (null — диалога нет). */
+    private val _ffcRejection = MutableStateFlow<FfcQuality.Report?>(null)
+    val ffcRejection: StateFlow<FfcQuality.Report?> = _ffcRejection.asStateFlow()
+
+    /** Подтверждение удаления эталона FFC из профиля выбранной лампы. */
+    private val _showFfcRemove = MutableStateFlow(false)
+    val showFfcRemove: StateFlow<Boolean> = _showFfcRemove.asStateFlow()
 
     // §4.2: предупреждение о несопоставимости снимков перед импортом профиля.
     private val _showImportWarning = MutableStateFlow(false)
@@ -263,7 +272,13 @@ class CameraProfilesViewModel @Inject constructor(
         // черновик при этом не меняется — остаётся прежний эталон.
         var accepted: FfcReference? = null
         runProc(AutoProc.FLAT_FIELD, { "Эталон FFC снят (${accepted?.quality?.summary()}). Сохраните профиль, чтобы применить." }) { base, lamp ->
-            val ref = controller.captureFfcReference(lamp)
+            val ref = try {
+                controller.captureFfcReference(lamp)
+            } catch (e: FfcQuality.RejectedException) {
+                // Причины длинные — не в короткое сообщение, а в диалог целиком.
+                _ffcRejection.value = e.report
+                return@runProc null
+            }
             if (ref == null) {
                 _message.value = "FFC не поддерживается этой камерой"
                 null
@@ -272,6 +287,40 @@ class CameraProfilesViewModel @Inject constructor(
                 base.copy(ffcTemplatePath = ref.path)
             }
         }
+    }
+
+    fun dismissFfcRejection() {
+        _ffcRejection.value = null
+    }
+
+    /** Из диалога отказа: снять эталон заново (снова с инструкцией). */
+    fun retryFfc() {
+        _ffcRejection.value = null
+        requestFfc()
+    }
+
+    /** Запросить удаление эталона FFC (только если он есть в черновике выбранной лампы). */
+    fun requestFfcRemove() {
+        if (refuseIfBusy() || !isLoaded() || _working.value.ffcTemplatePath.isBlank()) return
+        _showFfcRemove.value = true
+    }
+
+    fun dismissFfcRemove() {
+        _showFfcRemove.value = false
+    }
+
+    /**
+     * Убрать эталон FFC из черновика выбранной лампы: снимки пойдут без коррекции освещения после
+     * сохранения профиля. Файл эталона не удаляется (R11: на него ссылаются уже снятые слои).
+     */
+    fun confirmFfcRemove() {
+        _showFfcRemove.value = false
+        if (refuseIfBusy() || !isLoaded()) return
+        val lamp = _lamp.value
+        val draft = drafts[lamp] ?: return
+        if (draft.ffcTemplatePath.isBlank()) return
+        setDraft(lamp, draft.copy(ffcTemplatePath = ""))
+        _message.value = "Эталон FFC убран. Сохраните профиль, чтобы применить."
     }
 
     // ---- Сохранение (§4.1) ---------------------------------------------------------------

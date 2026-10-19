@@ -1,5 +1,6 @@
 package com.siams.kern_prototype.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -10,6 +11,7 @@ import com.siams.kern_prototype.data.PassportCodec
 import com.siams.kern_prototype.data.db.relation.TableWithLayers
 import com.siams.kern_prototype.ui.nav.Routes
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -46,22 +48,29 @@ class TableViewViewModel @Inject constructor(
     }
 
     fun deleteLayer(layerId: String) {
-        viewModelScope.launch {
-            try {
-                repository.deleteLayer(layerId)
-            } catch (e: IllegalStateException) {
-                _message.value = e.message
-            }
-        }
+        delete("Не удалось удалить слой") { repository.deleteLayer(layerId) }
     }
 
     fun deleteTable() {
+        delete("Не удалось удалить стол") {
+            repository.deleteTable(tableId)
+            _closed.value = true
+        }
+    }
+
+    /** Отказ удаления — сообщением (R05 и ошибки БД); отмена корутины пробрасывается. */
+    private fun delete(failure: String, op: suspend () -> Unit) {
         viewModelScope.launch {
             try {
-                repository.deleteTable(tableId)
-                _closed.value = true
+                op()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: IllegalStateException) {
-                _message.value = e.message
+                _message.value = e.message ?: failure
+            } catch (e: Exception) {
+                // Ошибка до фиксации транзакции (deleteInTransaction): записи и файлы не тронуты.
+                runCatching { Log.w("TableViewViewModel", failure, e) }
+                _message.value = "$failure — ничего не удалено. Повторите попытку."
             }
         }
     }

@@ -205,20 +205,33 @@ class KernRepository @Inject constructor(
      * R05: во время отправки запрещено (проверка в транзакции).
      */
     suspend fun deleteTable(tableId: String) {
+        deleteTables(listOf(tableId), "удалить стол")
+    }
+
+    /**
+     * Удалить несколько столов одной транзакцией — все или ни одного (как [deleteTable]: записи
+     * и dirty, затем файлы). R05: если хоть одно долбление отправляется — не удаляется ничего.
+     * Уже исчезнувшие столы пропускаются. Возвращает число удалённых столов.
+     */
+    suspend fun deleteTables(tableIds: Collection<String>, action: String = "удалить столы"): Int {
+        var deleted = emptyList<String>()
         deleteInTransaction(
             body = {
-                tableDao.getById(tableId)?.let { table ->
-                    ensureNotSending(table.drillingId, "удалить стол")
-                    val files = layerDao.listByTable(tableId).flatMap(::filesOf)
-                    tableDao.deleteById(tableId)
-                    db.formDraftDao().deleteOrphans() // R15: черновик глубин стола
-                    markDrillingDirty(table.drillingId)
-                    files
-                }
+                val tables = tableIds.distinct().mapNotNull { tableDao.getById(it) }
+                if (tables.isEmpty()) return@deleteInTransaction null
+                val drillingIds = tables.map { it.drillingId }.distinct()
+                drillingIds.forEach { ensureNotSending(it, action) }
+                val files = tables.flatMap { layerDao.listByTable(it.id).flatMap(::filesOf) }
+                tables.forEach { tableDao.deleteById(it.id) }
+                db.formDraftDao().deleteOrphans() // R15: черновики глубин столов
+                drillingIds.forEach { markDrillingDirty(it) }
+                deleted = tables.map { it.id }
+                files
             },
-            stillExists = { tableDao.getById(tableId) != null },
+            stillExists = { deleted.any { tableDao.getById(it) != null } },
             cleanup = { files -> files.forEach { discardIfUnreferenced(it) } },
         )
+        return deleted.size
     }
 
     // ---- Слои (снимки) -----------------------------------------------------

@@ -191,17 +191,111 @@ class CameraProfilesViewModelTest {
     }
 
 
-    /** R22: отклонённый эталон не попадает в черновик — остаётся прежний; причина — в сообщении. */
+    /**
+     * R22: отклонённый эталон не попадает в черновик — остаётся прежний; причины — отчётом для диалога
+     * (короткое сообщение их обрезало), без отдельного сообщения.
+     */
     @Test
     fun rejectedFfcKeepsPreviousTemplateAndExplainsWhy() {
         waitUntil { vm.loaded.value == LampType.DAYLIGHT }
         onMain { vm.update(vm.working.value.copy(ffcTemplatePath = "/ffc/old.png")) }
-        camera.ffcRejection = ffcReport(LampType.DAYLIGHT, listOf("пересвет 5.00% пикселей"))
+        val report = ffcReport(LampType.DAYLIGHT, listOf("пересвет 5.00% пикселей"))
+        camera.ffcRejection = report
         onMain { vm.confirmFfc() }
         waitUntil { camera.started.contains("ffc-DAYLIGHT") && vm.autoProc.value == AutoProc.NONE }
         assertEquals("/ffc/old.png", vm.working.value.ffcTemplatePath)
-        val msg = vm.message.value.orEmpty()
-        assertTrue(msg, msg.contains("отклонён") && msg.contains("пересвет") && msg.contains("Прежний эталон сохранён"))
+        assertEquals(report, vm.ffcRejection.value)
+        assertNull(vm.message.value)
+
+        onMain { vm.retryFfc() }
+        assertNull(vm.ffcRejection.value)
+        assertTrue("повтор — снова через инструкцию", vm.showFfcInstruction.value)
+        onMain { vm.dismissFfc() }
+    }
+
+    @Test
+    fun ffcRejectionDialogCanBeClosed() {
+        waitUntil { vm.loaded.value == LampType.DAYLIGHT }
+        camera.ffcRejection = ffcReport(LampType.DAYLIGHT, listOf("пересвет 5.00% пикселей"))
+        onMain { vm.confirmFfc() }
+        waitUntil { vm.ffcRejection.value != null && vm.autoProc.value == AutoProc.NONE }
+        onMain { vm.dismissFfcRejection() }
+        assertNull(vm.ffcRejection.value)
+        assertFalse(vm.showFfcInstruction.value)
+    }
+
+    /**
+     * Удаление эталона — правка черновика выбранной лампы после подтверждения; хранилище не тронуто.
+     * Профиль здесь не сохраняется: хранилище профилей общее для тестов этого процесса.
+     */
+    @Test
+    fun removeFfcClearsDraftOfSelectedLampAfterConfirmation() = runBlocking {
+        waitUntil { vm.loaded.value == LampType.DAYLIGHT }
+        val stored = store.read(LampType.DAYLIGHT).ffcTemplatePath
+        onMain { vm.update(vm.working.value.copy(ffcTemplatePath = "/ffc/old.png")) }
+
+        onMain { vm.requestFfcRemove() }
+        assertTrue(vm.showFfcRemove.value)
+        onMain { vm.dismissFfcRemove() }
+        assertFalse(vm.showFfcRemove.value)
+        assertEquals("отмена ничего не меняет", "/ffc/old.png", vm.working.value.ffcTemplatePath)
+
+        onMain { vm.requestFfcRemove(); vm.confirmFfcRemove() }
+        assertFalse(vm.showFfcRemove.value)
+        assertEquals("", vm.working.value.ffcTemplatePath)
+        assertTrue(vm.message.value.orEmpty(), vm.message.value.orEmpty().contains("Сохраните профиль"))
+        assertEquals("без сохранения хранилище прежнее", stored, store.read(LampType.DAYLIGHT).ffcTemplatePath)
+
+        onMain { vm.requestFfcRemove() }
+        assertFalse("без эталона удалять нечего", vm.showFfcRemove.value)
+    }
+
+    /**
+     * Удалить → сохранить → открыть профиль заново: эталона нет ни в редакторе, ни в хранилище,
+     * из которого контроллер при съёмке берёт профиль (ToupcamController.capture → profileStore.read),
+     * т. е. снимок пойдёт без коррекции. Само ветвление в контроллере здесь не проверяется — нужен SDK.
+     * Хранилище общее для тестов процесса — исходный профиль возвращается в конце.
+     */
+    @Test
+    fun removedFfcStaysRemovedAfterSaveAndReopen() = runBlocking {
+        waitUntil { vm.loaded.value == LampType.DAYLIGHT }
+        val original = store.read(LampType.DAYLIGHT)
+        try {
+            onMain { vm.update(vm.working.value.copy(ffcTemplatePath = "/ffc/old.png")); vm.confirmSave() }
+            // Дождаться конца сохранения в VM (сообщение — последний шаг), а не только записи хранилища.
+            waitUntil { vm.message.value.orEmpty().contains("сохранён") }
+            assertEquals("/ffc/old.png", store.read(LampType.DAYLIGHT).ffcTemplatePath)
+            onMain { vm.consumeMessage() }
+
+            onMain { vm.requestFfcRemove(); vm.confirmFfcRemove(); vm.confirmSave() }
+            waitUntil { vm.message.value.orEmpty().contains("сохранён") }
+            assertEquals("", store.read(LampType.DAYLIGHT).ffcTemplatePath)
+
+            lateinit var reopened: CameraProfilesViewModel
+            onMain {
+                reopened = CameraProfilesViewModel(store, ProfileTransfer(context, json, store), camera, com.siams.kern_prototype.camera.UsbDeviceEvents(context)).also { vms += it }
+            }
+            waitUntil { reopened.loaded.value == LampType.DAYLIGHT }
+            assertEquals("", reopened.working.value.ffcTemplatePath)
+            assertTrue("после сохранения черновиков нет", reopened.dirty.value.isEmpty())
+            assertEquals("съёмка возьмёт профиль без эталона", "", store.read(LampType.DAYLIGHT).ffcTemplatePath)
+        } finally {
+            store.save(original)
+        }
+    }
+
+    @Test
+    fun removeFfcIsRefusedDuringAutoProcedure() {
+        waitUntil { vm.loaded.value == LampType.DAYLIGHT }
+        onMain { vm.update(vm.working.value.copy(ffcTemplatePath = "/ffc/old.png")) }
+        camera.gate = CompletableDeferred()
+        onMain { vm.runAutoExposure() }
+        waitUntil { camera.started.contains("ae") }
+        onMain { vm.requestFfcRemove(); vm.confirmFfcRemove() }
+        assertFalse(vm.showFfcRemove.value)
+        camera.gate!!.complete(Unit)
+        waitUntil { vm.autoProc.value == AutoProc.NONE }
+        assertEquals("/ffc/old.png", vm.working.value.ffcTemplatePath)
     }
 
     @Test

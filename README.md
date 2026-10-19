@@ -1,93 +1,67 @@
 # Kern Capture
 
+Android-приложение для фотосъёмки керна внешней USB-камерой **Touptek**, ведения
+паспортов и глубин, локального архива и отправки снимков в **S900**.
 
+Основной сценарий: **долбление → стол → снимки DAYLIGHT и UF → проверка → отправка**.
+Съёмка и редактирование доступны без сети.
 
-## Getting started
+## С чего начать
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+| Задача | Документ |
+|---|---|
+| Понять экраны и поведение | [Сценарии работы](docs/WORKFLOWS.md) |
+| Разобраться в коде и данных | [Архитектура](docs/ARCHITECTURE.md) |
+| Собрать APK, запустить тесты, снять логи | [Разработка](docs/DEVELOPMENT.md) |
+| Узнать ограничения и вопросы | [Статус](docs/STATUS.md) |
+| Подключить Touptek | [Интеграция камеры](TOUPCAM_SETUP.md) |
+| Проверить сборку на оборудовании | [Чек-лист приёмки](ACCEPTANCE_CHECKLIST.md) |
+| Прочитать исходные требования | [ТЗ](ANDROID_KERN_APP.md), [FIXES](FIXES_2026-08-27.md) |
+| Работать с AI-агентом | [Правила репозитория](CLAUDE.md) |
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Возможности
 
-## Add your files
+- Профили DAYLIGHT/UF, автоэкспозиция, автобаланс белого, эталоны FFC.
+- Превью без растяжения, адаптивная компоновка при повороте.
+- Паспорт и глубины, автосохранение и восстановление черновиков.
+- JPEG, миниатюры и аудит параметров камеры в локальном архиве.
+- Очередь отправки S900, прогресс и сообщения об ошибках.
+- Шифрование пароля через Android Keystore, явные миграции и защита открытия БД.
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Быстрый старт
 
+Откройте проект в Android Studio, настройте Gradle JDK, Android SDK для
+compileSdk 36.1 и NDK 28.2.13676358. Подробности — в [DEVELOPMENT](docs/DEVELOPMENT.md).
+
+```bash
+./gradlew :app:assembleDebug
+./gradlew :app:testDebugUnitTest :app:lintDebug
 ```
-cd existing_repo
-git remote add origin https://g2.siams.com/s8/kern-capture.git
-git branch -M main
-git push -uf origin main
-```
 
-## Integrate with your tools
+APK: `app/build/outputs/apk/debug/app-debug.apk`.
+Пакет: `com.siams.kern_prototype` (название репозитория его не меняет).
+Android 8.0/API 26+, ABI `arm64-v8a` и `armeabi-v7a`.
+Для съёмки нужен совместимый телефон с USB-host, камера и подходящее питание.
 
-* [Set up project integrations](https://g2.siams.com/s8/kern-capture/-/settings/integrations)
+## Готовность
 
-## Collaborate with your team
+Последняя локальная проверка перед обновлением документации, 2026-10-05:
+**345 тестов успешно, assembleDebug успешно, lint — 0 ошибок и 46 предупреждений**.
+Это результат конкретного прогона, а не автоматически обновляемый показатель.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Аппаратная и сквозная приёмка текущей версии ещё нужна. Старые успешные проверки
+на оборудовании не подтверждают последующие изменения.
+**SENT означает завершение клиентской отправки, но не доказывает полноту архива
+на S900.** Замена/удаление серверных снимков и потерянный ответ POST — открытые R04/R06.
 
-## Test and Deploy
+## Статус документов
 
-Use the built-in continuous integration in GitLab.
+`docs/` описывает текущую реализацию; ТЗ и FIXES сохраняют требования.
+Расхождения перечислены в [STATUS](docs/STATUS.md). При расхождении текста и кода
+сверяйте реализацию; изменение требований согласуется отдельно.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+История: [ревью](REVIEW_2026-09-29.md), [аудит](CLAUDE_AUDIT_2026-09-29.md),
+[аппаратная отладка](TOUPCAM_DEBUG.md). Их выводы относятся к описанным там версиям.
 
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+ToupCam SDK содержит проприетарные компоненты; см. раздел лицензии
+[TOUPCAM_SETUP](TOUPCAM_SETUP.md).

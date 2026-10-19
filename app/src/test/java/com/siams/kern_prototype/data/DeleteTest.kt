@@ -158,6 +158,73 @@ class DeleteTest {
         assertTrue(photo.exists())
     }
 
+    // ---- несколько столов ----
+
+    /** Второй стол того же долбления со снимком; возвращает id стола и файл. */
+    private fun secondTable(): Pair<String, File> = runBlocking {
+        val (id, f) = repo.newLayerFile(drillingId)
+        f.writeBytes(TestJpeg.bytes())
+        repo.saveCapture(drillingId, null, id, LampType.DAYLIGHT, f, CameraProfile.defaultFor(LampType.DAYLIGHT)).id to f
+    }
+
+    @Test
+    fun deleteTables_removesAllSelectedAndTheirFiles() = runBlocking {
+        val (table2, photo2) = secondTable()
+        val (table3, photo3) = secondTable()
+        val revision = db.drillingDao().getById(drillingId)!!.editRevision
+        assertEquals(2, repo.deleteTables(setOf(tableId, table2, "нет-такого")))
+        assertNull(db.tableDao().getById(tableId))
+        assertNull(db.tableDao().getById(table2))
+        assertNotNull("невыбранный стол цел", db.tableDao().getById(table3))
+        assertFalse(photo.exists())
+        assertFalse(photo2.exists())
+        assertTrue(photo3.exists())
+        assertTrue("долбление помечено изменённым", db.drillingDao().getById(drillingId)!!.editRevision > revision)
+    }
+
+    @Test
+    fun deleteTables_whileSendingDeletesNothing() = runBlocking {
+        val (table2, photo2) = secondTable()
+        db.drillingDao().update(db.drillingDao().getById(drillingId)!!.copy(syncStatus = com.siams.kern_prototype.domain.model.SyncStatus.SENDING))
+        try { repo.deleteTables(setOf(tableId, table2)); fail() } catch (e: IllegalStateException) {
+            assertTrue(e.message, e.message!!.contains("удалить столы"))
+        }
+        assertNotNull(db.tableDao().getById(tableId))
+        assertNotNull(db.tableDao().getById(table2))
+        assertTrue(photo.exists())
+        assertTrue(photo2.exists())
+    }
+
+    @Test
+    fun deleteTables_cancelBeforeCommit_keepsEverything() {
+        val (table2, photo2) = secondTable()
+        cancelBeforeCommit { repo.deleteTables(setOf(tableId, table2)) }
+        runBlocking {
+            assertNotNull(db.tableDao().getById(tableId))
+            assertNotNull(db.tableDao().getById(table2))
+        }
+        assertTrue(photo.exists())
+        assertTrue(photo2.exists())
+    }
+
+    @Test
+    fun deleteTables_cancelAfterCommit_cleansFiles() {
+        val (table2, photo2) = secondTable()
+        cancelAtCommit { repo.deleteTables(setOf(tableId, table2)) }
+        runBlocking {
+            assertNull(db.tableDao().getById(tableId))
+            assertNull(db.tableDao().getById(table2))
+        }
+        assertFalse(photo.exists())
+        assertFalse(photo2.exists())
+    }
+
+    @Test
+    fun deleteTables_nothingToDelete() = runBlocking {
+        assertEquals(0, repo.deleteTables(setOf("нет-такого")))
+        assertNotNull(db.tableDao().getById(tableId))
+    }
+
     // ---- долбление ----
 
     @Test
