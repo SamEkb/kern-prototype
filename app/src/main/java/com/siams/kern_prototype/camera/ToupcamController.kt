@@ -390,11 +390,44 @@ class ToupcamController internal constructor(
             inWindow.map { SdkEventRecord(it.code, SdkEvents.name(it.code), (it.arrivedNs - startNs) / 1_000_000) } to truncated
         }
 
-    /** Записать вызов SDK авто-процедуры; поведение не меняется (отказ только фиксируется). */
-    private fun sdk(calls: MutableList<SdkCall>, op: String, args: String, hr: Int) {
+    /** Записать вызов SDK авто-процедуры (операция, аргументы, HRESULT) — в итог и журнал. */
+    private fun sdk(calls: MutableList<SdkCall>, op: String, args: String, hr: Int): SdkCall {
         val call = SdkCall(op, args, hr)
         calls += call
         if (hr < 0) Log.w(TAG, "SDK отклонил $op($args): ${call.hr}") else Log.i(TAG, "SDK $op($args) → ${call.hr}")
+        return call
+    }
+
+    /**
+     * Обязательный рабочий вызов авто-процедуры: без него результат процедуры не имеет смысла,
+     * поэтому отказ (HRESULT < 0) её прекращает — с названием вызова и HRESULT в сообщении.
+     */
+    private fun sdkRequired(calls: MutableList<SdkCall>, op: String, args: String, hr: Int) {
+        val call = sdk(calls, op, args, hr)
+        check(call.ok) { "SDK отклонил $op($args): ${call.hr}" }
+    }
+
+    /**
+     * Завершающее применение профиля авто-процедуры. Выключение AE в нём обязательно: без него
+     * ручной режим не подтверждён и результат не детерминирован (§6.2), поэтому его отказ
+     * прекращает процедуру. Отказы прочих сеттеров — предупреждения применения (R14).
+     */
+    private fun applyResult(dev: ToupcamDevice, profile: CameraProfile, calls: MutableList<SdkCall>) {
+        applyAndReport(dev, profile)
+        lastApplyReport?.rejected?.get("AutoExpoEnable")?.let { hex ->
+            sdkRequired(calls, "AutoExpoEnable", "0, применение профиля", java.lang.Long.decode(hex).toInt())
+        }
+    }
+
+    /**
+     * Обязательное чтение результата из массива [CamLibDevice.readState] (пары HRESULT, значения).
+     * Только успешное чтение даёт значения: отдельные геттеры (getExpoTime и т. п.) при отказе
+     * возвращают подставленные JNI значения, неотличимые от настоящих.
+     */
+    private fun readRequired(calls: MutableList<SdkCall>, op: String, state: IntArray, hrIndex: Int, count: Int): IntArray {
+        sdkRequired(calls, op, "", state.getOrElse(hrIndex) { -1 })
+        check(state.size > hrIndex + count) { "SDK не вернул значение $op" }
+        return IntArray(count) { state[hrIndex + 1 + it] }
     }
 
     /** R14: фактическое состояние параметров по данным SDK (в очереди подключения). */
@@ -444,7 +477,7 @@ class ToupcamController internal constructor(
             applyToConnection(conn, profile)
             applied ?: error("Профиль не применён")
         }
-        awaitSettled(ready)
+        awaitSettled(conn, ready)
         return ready
     }
 
@@ -452,12 +485,25 @@ class ToupcamController internal constructor(
      * Дождаться [SETTLE_FRAMES] кадров превью после применения [a]. Предел зависит от выдержки
      * ([settleTimeoutFor]): при длинной выдержке кадры превью идут редко. Не дождались — ошибка:
      * снимать с неподтверждёнными параметрами нельзя.
+     * Подключение [conn] потеряно (событие ошибки/отключения ЭТОГО подключения, закрытие или
+     * замена) — ошибка сразу, без ожидания предела: кадров уже не будет. Восстановление — штатное
+     * ([connectionForSnap] при следующем снимке или [recover]).
      * Состояние ожидания хранится с применением — отменённое ожидание продолжится при следующем снимке.
      */
-    private suspend fun awaitSettled(a: Applied) {
+    private suspend fun awaitSettled(conn: CameraConnection, a: Applied) {
         val timeoutMs = settleTimeoutFor(knownExposureUs(a.report), a.previousExposureUs)
         val ok = withTimeoutOrNull(timeoutMs) {
-            while (a.framesAfter.get() < SETTLE_FRAMES) delay(FRAME_POLL_MS)
+            while (true) {
+                // needsRecovery выставляют только события текущего поколения (onSdkEvent) и закрытие.
+                if (conn.isClosed || connection !== conn || stillGate.needsRecovery) {
+                    throw IllegalStateException(
+                        "Камера отключена во время ожидания кадров превью — снимок не выполнен. " +
+                            "Подключите камеру и повторите снимок.",
+                    )
+                }
+                if (a.framesAfter.get() >= SETTLE_FRAMES) break
+                delay(FRAME_POLL_MS)
+            }
         }
         if (ok == null) {
             throw IllegalStateException(
@@ -474,24 +520,28 @@ class ToupcamController internal constructor(
      * §6.2) и возвращаем профиль с подставленными значениями.
      */
     override suspend fun autoExposure(current: CameraProfile): CameraProfile = opLock.withLock {
-        val conn = connection ?: return@withLock current
+        val conn = connection ?: error("Камера Touptek не открыта")
         autoProcedure("Автоэкспозиция", conn, current) { calls ->
-            // Вызовы SDK и их порядок — прежние; каждый шаг — в очереди подключения.
+            // Порядок вызовов SDK прежний; каждый шаг — в очереди подключения. Отказ рабочего
+            // вызова прекращает процедуру: ограничения AE обязательны — на них рассчитан выбор
+            // выдержки вместо усиления; без включения AE нечего читать, без выключения нет ручного режима.
             applied = null                     // авто-режим: параметры камеры меняются сами
             conn.run { cam ->
-                sdk(calls, "MaxAutoExpoTimeAGain", "$AE_MAX_TIME_US us, $AE_MAX_GAIN_PERCENT %",
+                sdkRequired(calls, "MaxAutoExpoTimeAGain", "$AE_MAX_TIME_US us, $AE_MAX_GAIN_PERCENT %",
                     cam.setMaxAutoExpoTimeAGain(AE_MAX_TIME_US, AE_MAX_GAIN_PERCENT))
-                sdk(calls, "AutoExpoEnable", "1", cam.setAutoExpoEnable(1)) // включить авто-AE
+                sdkRequired(calls, "AutoExpoEnable", "1", cam.setAutoExpoEnable(1)) // включить авто-AE
             }
-            delay(AE_CONVERGE_MS)              // дать сойтись (~кадры на нашем fps)
+            delay(AE_CONVERGE_MS)              // дать сойтись (~кадры на нашем fps); сходимость не проверяется
             val updated = applyToConnection(conn, current) { cam ->
-                val us = cam.getExpoTime()
-                val gainPct = cam.getExpoAGain()
-                sdk(calls, "AutoExpoEnable", "0", cam.setAutoExpoEnable(0)) // заморозить — дальше только ручное
+                // Результат AE — из успешных чтений ДО повторной записи сеттерами профиля.
+                val state = cam.readState()
+                val us = readRequired(calls, "get_ExpoTime", state, CameraReadback.HR_EXPOSURE, 1)[0]
+                val gainPct = readRequired(calls, "get_ExpoAGain", state, CameraReadback.HR_GAIN, 1)[0]
+                sdkRequired(calls, "AutoExpoEnable", "0", cam.setAutoExpoEnable(0)) // заморозить — дальше только ручное
                 current.copy(
                     exposureTimeNs = us.toLong() * 1_000L,
                     iso = gainPct,
-                ).also { applyAndReport(cam, it) }
+                ).also { applyResult(cam, it, calls) }
             }
             currentProfile = updated
             updated
@@ -504,21 +554,23 @@ class ToupcamController internal constructor(
      * [ToupcamProfileApplier.toWbGain]: multiplier = 2^(gain/64)). Зелёный — опорный (1.0).
      */
     override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile = opLock.withLock {
-        val conn = connection ?: return@withLock current
+        val conn = connection ?: error("Камера Touptek не открыта")
         autoProcedure("Автобаланс белого", conn, current) { calls ->
             applied = null                     // one-push AWB меняет баланс белого сам
-            conn.run { sdk(calls, "AwbInit", "one-push", it.awbOnce()) }
-            delay(AWB_SETTLE_MS)
+            conn.run { sdkRequired(calls, "AwbInit", "one-push", it.awbOnce()) }
+            delay(AWB_SETTLE_MS)               // завершение AWB не проверяется — только чтение после
             val updated = applyToConnection(conn, current) { cam ->
-                val g = cam.getWhiteBalanceGain()  // [R, G, B], знаковые (-127..127)
-                val red = 2.0.pow((g.getOrElse(0) { 0 }) / 64.0).toFloat()
-                val blue = 2.0.pow((g.getOrElse(2) { 0 }) / 64.0).toFloat()
+                // [R, G, B], знаковые (-127..127) — из успешного чтения ДО повторной записи сеттерами.
+                // [0, 0, 0] — допустимый результат (множители 1.0), если чтение успешно.
+                val g = readRequired(calls, "get_WhiteBalanceGain", cam.readState(), CameraReadback.HR_WB, 3)
+                val red = 2.0.pow(g[0] / 64.0).toFloat()
+                val blue = 2.0.pow(g[2] / 64.0).toFloat()
                 current.copy(
                     wbRedGain = red,
                     wbGreenEvenGain = 1f,
                     wbGreenOddGain = 1f,
                     wbBlueGain = blue,
-                ).also { applyAndReport(cam, it) }
+                ).also { applyResult(cam, it, calls) }
             }
             currentProfile = updated
             updated
@@ -526,10 +578,10 @@ class ToupcamController internal constructor(
     }
 
     /**
-     * Обвязка авто-процедуры (AE/AWB): вызовы [body] не меняются. R13: прерванная процедура
-     * (ошибка/отмена) возвращает ручной режим с прежним профилем. 5k: события SDK за время процедуры
-     * собираются, ПОСЛЕ неё (и после возврата ручного режима) читается состояние SDK, итог —
-     * [lastAutoSummary] и одна строка журнала.
+     * Обвязка авто-процедуры (AE/AWB). R13: прерванная процедура (ошибка/отмена) возвращает ручной
+     * режим с прежним профилем; исход возврата (по HRESULT) — в сообщении ошибки и в итоге. Отмена
+     * остаётся отменой. 5k: события SDK за время процедуры собираются, ПОСЛЕ неё (и после возврата
+     * ручного режима) читается состояние SDK, итог — [lastAutoSummary] и одна строка журнала.
      */
     private suspend fun autoProcedure(
         name: String,
@@ -545,17 +597,23 @@ class ToupcamController internal constructor(
         val window = openWindow(generation, conn.arrivalBoundary())
         var result: CameraProfile? = null
         var outcome = "ошибка"
+        var restore: String? = null
         try {
             return body(calls).also { result = it; outcome = "завершена" }
         } catch (e: CancellationException) {
             outcome = "отменена"
             throw e
+        } catch (e: Exception) {
+            val reason = e.message ?: e.javaClass.simpleName
+            outcome = "ошибка: $reason"
+            restore = restoreManual(conn, current)
+            throw IllegalStateException("$name: не выполнено — $reason. После прерывания: $restore.", e)
         } catch (t: Throwable) {
             outcome = "ошибка: ${t.message ?: t.javaClass.simpleName}"
             throw t
         } finally {
             lastAutoCalls = calls.toList()
-            if (result == null) restoreManual(conn, current)
+            if (result == null && restore == null) restore = restoreManual(conn, current)
             // Конец окна — после последнего рабочего вызова (и возврата ручного режима). Чтение
             // состояния идёт той же очередью ПОСЛЕ фиксации границы, поэтому к его завершению все
             // события окна уже обработаны (в буфере).
@@ -579,16 +637,30 @@ class ToupcamController internal constructor(
                 readbackAfter = after,
                 events = events,
                 eventsTruncated = truncated,
+                restore = restore,
             )
             lastAutoSummary = summary
             runCatching { Log.i(TAG, summary.describe()) }
         }
     }
 
-    /** R13: вернуть ручной режим и прежний профиль после прерванной авто-процедуры (не отменяется). */
-    private suspend fun restoreManual(conn: CameraConnection, profile: CameraProfile) = withContext(NonCancellable) {
-        runCatching { applyToConnection(conn, profile) }
-            .onFailure { Log.w(TAG, "Не удалось вернуть ручной режим: ${it.message}") }
+    /**
+     * R13: вернуть ручной режим и прежний профиль после прерванной авто-процедуры (не отменяется).
+     * Возвращает исход по HRESULT сеттеров: отказ выключения AE — ручной режим не подтверждён.
+     * Принятые вызовы — это принятие SDK, а не проверка кадра.
+     */
+    private suspend fun restoreManual(conn: CameraConnection, profile: CameraProfile): String = withContext(NonCancellable) {
+        val report = runCatching { applyToConnection(conn, profile); lastApplyReport }
+        val rejected = report.getOrNull()?.rejected.orEmpty()
+        val text = when {
+            report.isFailure -> "ручной режим и прежний профиль не возвращены (${report.exceptionOrNull()?.message})"
+            "AutoExpoEnable" in rejected -> "ручной режим не подтверждён — SDK отклонил AutoExpoEnable(0): ${rejected["AutoExpoEnable"]}"
+            rejected.isNotEmpty() -> "ручной режим возвращён, но SDK не принял параметры прежнего профиля: " +
+                rejected.entries.joinToString { "${it.key} ${it.value}" }
+            else -> "SDK принял возврат ручного режима и прежнего профиля"
+        }
+        if (report.isFailure || rejected.isNotEmpty()) Log.w(TAG, "Возврат после авто-процедуры: $text")
+        text
     }
 
 

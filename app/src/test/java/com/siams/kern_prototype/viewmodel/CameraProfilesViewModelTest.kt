@@ -56,11 +56,13 @@ class CameraProfilesViewModelTest {
         override suspend fun applyProfile(profile: CameraProfile) {}
         override suspend fun switchLamp(lampType: LampType) {}
         override suspend fun capture(target: File, lampType: LampType) = com.siams.kern_prototype.camera.CaptureOutcome(CameraProfile.defaultFor(lampType), audit = null)
+        /** Непустой — авто-процедура отказывает (как отказ вызова SDK в контроллере). */
+        @Volatile var autoFailure: Exception? = null
         override suspend fun autoExposure(current: CameraProfile): CameraProfile {
-            started += "ae"; gate?.await(); return current.copy(iso = 777)
+            started += "ae"; gate?.await(); autoFailure?.let { throw it }; return current.copy(iso = 777)
         }
         override suspend fun autoWhiteBalance(current: CameraProfile): CameraProfile {
-            started += "awb"; gate?.await(); return current.copy(wbRedGain = 3f)
+            started += "awb"; gate?.await(); autoFailure?.let { throw it }; return current.copy(wbRedGain = 3f)
         }
         /** R22: непустой — эталон отклоняется с этим отчётом. */
         @Volatile var ffcRejection: com.siams.kern_prototype.camera.FfcQuality.Report? = null
@@ -305,6 +307,32 @@ class CameraProfilesViewModelTest {
         waitUntil { camera.started.contains("ffc-DAYLIGHT") && vm.autoProc.value == AutoProc.NONE }
         assertEquals("/ffc/DAYLIGHT.png", vm.working.value.ffcTemplatePath)
         assertTrue(vm.message.value.orEmpty(), vm.message.value.orEmpty().contains("медиана"))
+    }
+
+    /** Отказ авто-процедуры: сообщение из контроллера (вызов и HRESULT), не «завершён»; черновик прежний. */
+    @Test
+    fun failedAutoProcedureShowsReasonAndKeepsDraft() {
+        waitUntil { vm.loaded.value == LampType.DAYLIGHT }
+        val before = vm.working.value
+        camera.autoFailure = IllegalStateException("Автобаланс белого: не выполнено — SDK отклонил AwbInit(one-push): 0x80004001")
+        onMain { vm.runAutoWhiteBalance() }
+        waitUntil { camera.started.contains("awb") && vm.autoProc.value == AutoProc.NONE }
+        assertEquals(camera.autoFailure!!.message, vm.message.value)
+        assertEquals(before, vm.working.value)
+        assertTrue(vm.dirty.value.isEmpty())
+    }
+
+    /** Закрытие экрана во время процедуры — отмена, а не сообщение об ошибке автонастройки. */
+    @Test
+    fun cancelledAutoProcedureIsNotReportedAsError() {
+        waitUntil { vm.loaded.value == LampType.DAYLIGHT }
+        val before = vm.working.value
+        camera.gate = CompletableDeferred()
+        onMain { vm.runAutoExposure() }
+        waitUntil { camera.started.contains("ae") }
+        stopViewModels(listOf(vm), main)
+        assertNull(vm.message.value)
+        assertEquals(before, vm.working.value)
     }
 
     @Test

@@ -46,6 +46,8 @@ internal interface ToupcamDevice {
     fun setWhiteBalanceGain(r: Int, g: Int, b: Int): Int
     fun setGamma(gamma: Int): Int
     fun setMaxAutoExpoTimeAGain(maxTimeUs: Int, maxGainPercent: Int): Int
+    // Геттеры без HRESULT: при отказе JNI возвращает подставленное значение. Для результата
+    // авто-процедур не используются — только [readState] с HRESULT.
     fun getExpoTime(): Int
     fun getExpoAGain(): Int
     fun awbOnce(): Int

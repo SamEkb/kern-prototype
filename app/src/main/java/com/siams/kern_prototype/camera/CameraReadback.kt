@@ -50,6 +50,11 @@ data class CameraReadback(
     companion object {
         private fun ok(hr: Int) = hr >= 0 // HRESULT: неотрицательный — успех
 
+        /** Индексы HRESULT чтений результата авто-процедур в массиве `readState` (за ними — значения). */
+        internal const val HR_EXPOSURE = 0
+        internal const val HR_GAIN = 4
+        internal const val HR_WB = 8
+
         /** 5l: новые чтения — имя поля и индекс HRESULT в массиве `readState` (jnicam.cpp). */
         private val DIAGNOSTIC_READS = listOf(
             "autoExposureTarget" to 26, "tempTint" to 28, "autoExposurePolicy" to 31,
@@ -65,11 +70,11 @@ data class CameraReadback(
             fun at(i: Int) = v.getOrElse(i) { -1 }
             fun value(hrIdx: Int) = if (ok(at(hrIdx))) at(hrIdx + 1) else null
             return CameraReadback(
-                exposureUs = value(0),
+                exposureUs = value(HR_EXPOSURE),
                 realExposureUs = value(2),
-                gainPercent = value(4),
+                gainPercent = value(HR_GAIN),
                 gamma = value(6),
-                wbGain = if (ok(at(8))) listOf(at(9), at(10), at(11)) else null,
+                wbGain = if (ok(at(HR_WB))) listOf(at(HR_WB + 1), at(HR_WB + 2), at(HR_WB + 3)) else null,
                 autoExposureMode = value(12),
                 exposureRangeUs = if (ok(at(14))) IntRange3(at(15), at(16), at(17)) else null,
                 gainRangePercent = if (ok(at(18))) IntRange3(at(19), at(20), at(21)) else null,

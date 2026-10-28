@@ -33,6 +33,13 @@ internal class FakeCameraRig {
     @Volatile var tempTintHr: Int = 0x80004001.toInt()
     /** 5k: события SDK, которые камера шлёт после включения авто-AE / запуска AWB (поток SDK). */
     @Volatile var aeEvents: List<Int> = emptyList()
+    /** Результат авто-AE (как сошлась бы камера): выдержка, мкс, и усиление, % — при включении AE. */
+    @Volatile var aeResultExpoUs = 1000
+    @Volatile var aeResultGainPct = 100
+    /** Результат one-push AWB: знаковые усиления R/G/B. */
+    @Volatile var awbResultGain = intArrayOf(0, 0, 0)
+    /** Отказ чтения в readState по имени (ExpoTime, ExpoAGain, WhiteBalanceGain) → HRESULT. */
+    val failReads: MutableMap<String, Int> = java.util.concurrent.ConcurrentHashMap()
     /** Вызовы коррекции FFC снимка (applyFlatField). */
     val flatFieldCalls = AtomicInteger()
     @Volatile var awbEvents: List<Int> = emptyList()
@@ -46,7 +53,7 @@ internal class FakeCameraRig {
     @Volatile var stillWH = intArrayOf(8, 6)
     /** Содержимое полного кадра (R22: эталон FFC разной пригодности). */
     @Volatile var stillFill: (Bitmap) -> Unit = { it.eraseColor(0xFF808080.toInt()) }
-    /** Сеттеры, которые SDK «отклоняет» (E_NOTIMPL), — по имени. */
+    /** Сеттеры, которые SDK «отклоняет» (E_NOTIMPL), — по имени; «AutoExpoEnable(1)» — только включение AE. */
     val rejectSetters: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
     /** Кадры превью (EVENT_IMAGE) идут, как у живой камеры; false — поток кадров остановлен. */
     @Volatile var previewFrames = true
@@ -169,10 +176,14 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
 
     override fun setAutoExpoEnable(mode: Int) = handle("setAutoExpoEnable") {
         rig.log += "ae$mode$id"
+        if (mode == 1 && hr("AutoExpoEnable") == 0 && hr("AutoExpoEnable(1)") == 0) {
+            expoUs = rig.aeResultExpoUs
+            gainPct = rig.aeResultGainPct
+        }
         if (mode == 1) rig.aeEvents.forEach { e -> thread { listener?.invoke(e) } }
         // Разово: AE выключает авто дважды (заморозка и применение профиля).
         if (mode == 0) rig.aeOffEvents.also { rig.aeOffEvents = emptyList() }.forEach { e -> listener?.invoke(e) }
-        hr("AutoExpoEnable")
+        hr("AutoExpoEnable($mode)").takeIf { it != 0 } ?: hr("AutoExpoEnable")
     }
     override fun setExpoTime(microseconds: Int) = handle("setExpoTime") {
         rig.log += "expo$id=$microseconds"
@@ -191,6 +202,7 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
     override fun getExpoTime() = handle("getExpoTime") { 1000 }
     override fun getExpoAGain() = handle("getExpoAGain") { 100 }
     override fun awbOnce() = handle("awbOnce") {
+        if (hr("AwbInit") == 0) wb = rig.awbResultGain.copyOf()
         rig.awbEvents.forEach { e -> thread { listener?.invoke(e) } }
         hr("AwbInit")
     }
@@ -198,11 +210,12 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
     override fun readState(): IntArray = handle("readState") {
         rig.log += "readState$id"
         if (rig.failReadState) error("SDK не ответил")
-        val wbHr = if ("WhiteBalanceGain" in rig.rejectSetters) E_NOTIMPL else 0
+        val wbHr = rig.failReads["WhiteBalanceGain"] ?: if ("WhiteBalanceGain" in rig.rejectSetters) E_NOTIMPL else 0
         val e = rig.expoRange
         val g = rig.gainRange
         intArrayOf(
-            0, expoUs, 0, expoUs, 0, gainPct, 0, gammaVal, wbHr, wb[0], wb[1], wb[2], 0, 0,
+            rig.failReads["ExpoTime"] ?: 0, expoUs, 0, expoUs, rig.failReads["ExpoAGain"] ?: 0, gainPct, 0, gammaVal,
+            wbHr, wb[0], wb[1], wb[2], 0, 0,
             e[0], e[1], e[2], e[3], g[0], g[1], g[2], g[3], 0, 1, 0, 0,
             // 5l: цель AE, Temp/Tint (по умолчанию отказ — режим RGB Gain), политика и процент AE,
             // LINEAR, CURVE, BYTEORDER, RGB.

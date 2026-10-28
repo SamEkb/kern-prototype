@@ -6,7 +6,8 @@ import kotlinx.serialization.Serializable
  * Диагностика WB/AE (5k): итог автопроцедуры камеры — для журнала и разбора на устройстве.
  *
  *  - [calls] — вызовы SDK процедуры и их HRESULT (каждый также пишется в журнал по мере вызова);
- *  - [result] — значения, записанные в профиль ([Result]); null — процедура не завершилась;
+ *  - [result] — значения, записанные в профиль ([Result]); null — процедура не завершилась
+ *    (отказ обязательного вызова или чтения, ошибка, отмена);
  *  - [readbackAfter] — состояние SDK, прочитанное ПОСЛЕ процедуры (null — прочитать не удалось:
  *    «неизвестно»). Это состояние SDK, а не доказанные параметры какого-либо кадра;
  *  - [events] — события SDK, ПОСТУПИВШИЕ за время процедуры (кроме кадров превью/снимка); время —
@@ -23,6 +24,8 @@ data class AutoProcedureSummary(
     val events: List<SdkEventRecord>,
     /** Часть событий окна процедуры вытеснена из буфера — список [events] неполный. */
     val eventsTruncated: Boolean = false,
+    /** Исход возврата ручного режима и прежнего профиля после прерванной процедуры; null — не требовался. */
+    val restore: String? = null,
 ) {
     @Serializable
     data class Result(val exposureUs: Long, val gainPercent: Int, val wbRed: Float, val wbGreen: Float, val wbBlue: Float)
@@ -32,6 +35,7 @@ data class AutoProcedureSummary(
         val eventsText = (if (events.isEmpty()) "нет" else events.joinToString { "${it.name}@${it.atMs}мс" }) +
             if (eventsTruncated) " (неполно: часть вытеснена)" else ""
         return "$procedure: $outcome за ${durationMs} мс; вызовы: $callsText; в профиль: ${result ?: "—"}; " +
+            (restore?.let { "возврат: $it; " } ?: "") +
             "состояние SDK после: ${readbackAfter ?: "неизвестно"}; события: $eventsText"
     }
 }

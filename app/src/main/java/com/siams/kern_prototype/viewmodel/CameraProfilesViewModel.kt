@@ -13,6 +13,7 @@ import com.siams.kern_prototype.data.settings.ProfileTransfer
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -226,19 +227,25 @@ class CameraProfilesViewModel @Inject constructor(
         _autoProc.value = kind
         viewModelScope.launch {
             try {
-                runCatching { block(base, lamp) }
-                    .onSuccess { result ->
-                        when {
-                            result == null -> Unit
-                            (revisions[lamp] ?: 0) != revision || result.lampType != lamp ->
-                                _message.value = "Результат автонастройки устарел и не применён"
-                            else -> {
-                                setDraft(lamp, result)
-                                _message.value = doneMessage()
-                            }
-                        }
+                // Отказ процедуры — сообщение (с вызовом SDK и HRESULT), черновик не меняется.
+                // Отмена (экран закрыт) — не ошибка автонастройки: пробрасывается.
+                val result = try {
+                    block(base, lamp)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    _message.value = e.message ?: "Ошибка автонастройки"
+                    null
+                }
+                when {
+                    result == null -> Unit
+                    (revisions[lamp] ?: 0) != revision || result.lampType != lamp ->
+                        _message.value = "Результат автонастройки устарел и не применён"
+                    else -> {
+                        setDraft(lamp, result)
+                        _message.value = doneMessage()
                     }
-                    .onFailure { _message.value = it.message ?: "Ошибка автонастройки" }
+                }
             } finally {
                 _autoProc.value = AutoProc.NONE
             }

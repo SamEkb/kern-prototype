@@ -6,6 +6,7 @@ import com.siams.kern_prototype.data.settings.CameraProfileStore
 import com.siams.kern_prototype.domain.model.CameraProfile
 import com.siams.kern_prototype.domain.model.LampType
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -16,6 +17,7 @@ import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -684,6 +686,63 @@ class ToupcamControllerTest {
         assertTrue(f.length() > 0)
     }
 
+    /** Начать снимок с лампой UF (применение профиля → ожидание кадров); вернуть, когда сеттеры прошли. */
+    private fun captureUfWaitingForFrames(scope: CoroutineScope, c: ToupcamController, device: String): Deferred<Result<CaptureOutcome>> {
+        val setExpo = "setExpo$device"
+        val before = rig.snapshot().count { it == setExpo }
+        val capture = scope.async(Dispatchers.IO) { runCatching { c.capture(target(), LampType.UF) } }
+        val end = System.currentTimeMillis() + 3000
+        while (rig.snapshot().count { it == setExpo } <= before && System.currentTimeMillis() < end) Thread.sleep(5)
+        assertTrue("профиль UF применяется", rig.snapshot().count { it == setExpo } > before)
+        return capture
+    }
+
+    /**
+     * Отключение во время ожидания кадров превью: ошибка сразу, а не по пределу ожидания (здесь
+     * ~30 с из-за длинной выдержки UF); Snap не вызывается; затем штатное восстановление и снимок.
+     */
+    @Test
+    fun disconnectDuringFrameWaitFailsFastWithoutSnapAndCaptureRecovers() = runBlocking {
+        CameraProfileStore(context, json).save(CameraProfile.defaultFor(LampType.UF).copy(exposureTimeNs = 10_000_000_000L))
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.previewFrames = false                           // кадров нет — ожидание длится
+        val capture = captureUfWaitingForFrames(this, c, "1")
+        val t0 = System.nanoTime()
+        rig.devices[0].listener!!(ToupcamController.EVENT_DISCONNECTED)
+        val result = capture.awaitWithin(5_000)
+        val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+        val error = result.exceptionOrNull()
+        assertTrue("$error", error is IllegalStateException && error.message!!.contains("отключена"))
+        assertTrue("без ожидания предела: $elapsedMs мс", elapsedMs < 2_000)
+        assertFalse("Snap не вызывался", rig.has("snapStart1"))
+
+        rig.previewFrames = true                            // камера снова на месте
+        val f = target()
+        c.capture(f, LampType.DAYLIGHT)                     // штатный путь: переподключение перед снимком
+        assertTrue(rig.has("open2"))
+        assertTrue(f.length() > 0)
+    }
+
+    /** События прежнего подключения (отключение, кадры) не прерывают и не подтверждают ожидание нового. */
+    @Test
+    fun staleConnectionEventsNeitherAbortNorConfirmFrameWait() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        c.recover()                                         // подключение 2; первое закрыто
+        assertTrue(rig.has("open2"))
+        rig.previewFrames = false
+        val capture = captureUfWaitingForFrames(this, c, "2")
+        val old = rig.devices[0].originalListener!!
+        old(ToupcamController.EVENT_DISCONNECTED)
+        repeat(3) { old(ToupcamController.EVENT_IMAGE) }
+        Thread.sleep(300)
+        assertFalse("ожидание не прервано и не подтверждено чужими событиями", capture.isCompleted)
+        assertFalse(rig.has("snapStart2"))
+        rig.previewFrames = true
+        assertTrue("${capture.awaitWithin().exceptionOrNull()}", capture.awaitWithin().isSuccess)
+    }
+
     @Test
     fun failedFirstOpenCanBeRecovered() = runBlocking {
         rig.failAccess += "1"
@@ -815,30 +874,159 @@ class ToupcamControllerTest {
         assertFalse("Snap не выполнялся", rig.has("snap1"))
     }
 
-    @Test
-    fun rejectedAutoExposureCallsAreRecorded() = runBlocking {
-        rig.rejectSetters += "MaxAutoExpoTimeAGain"
-        rig.rejectSetters += "AutoExpoEnable"
-        val c = controller()
-        c.open(LampType.DAYLIGHT)
-        val result = c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) // поведение прежнее
-        assertEquals(LampType.DAYLIGHT, result.lampType)
-        val calls = c.lastAutoCalls
-        assertEquals(listOf("MaxAutoExpoTimeAGain", "AutoExpoEnable", "AutoExpoEnable"), calls.map { it.op })
-        assertEquals(listOf("1000000 us, 400 %", "1", "0"), calls.map { it.args })
-        assertTrue("все отказы видны", calls.all { !it.ok && it.hr == "0x80004001" })
+    private suspend fun failureOf(block: suspend () -> Any): IllegalStateException {
+        val result = try { block() } catch (e: IllegalStateException) { return e }
+        throw AssertionError("ожидалась ошибка процедуры, получено $result")
     }
 
+    /** Отказ ограничений AE прекращает процедуру: AE не включается, успеха и результата нет. */
     @Test
-    fun rejectedAwbStartIsRecorded() = runBlocking {
-        rig.rejectSetters += "AwbInit"
+    fun rejectedAutoExposureLimitsStopProcedure() = runBlocking {
         val c = controller()
         c.open(LampType.DAYLIGHT)
-        c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        rig.rejectSetters += "MaxAutoExpoTimeAGain"
+        val e = failureOf { c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        assertTrue(e.message, e.message!!.contains("MaxAutoExpoTimeAGain") && e.message!!.contains("0x80004001"))
+        assertEquals("после отказа — ни включения AE, ни чтений", listOf("MaxAutoExpoTimeAGain"), c.lastAutoCalls.map { it.op })
+        assertFalse(rig.has("ae11"))
+        val s = c.lastAutoSummary!!
+        assertTrue(s.outcome, s.outcome.startsWith("ошибка"))
+        assertNull(s.result)
+    }
+
+    /** Отказ включения AE: успеха нет, профиль не заменяется результатом. */
+    @Test
+    fun rejectedAutoExposureEnableGivesNoResult() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.rejectSetters += "AutoExpoEnable(1)"
+        val before = c.activeProfile
+        val e = failureOf { c.autoExposure(before.copy(exposureTimeNs = 5_000_000L)) }
+        assertTrue(e.message, e.message!!.contains("AutoExpoEnable(1)") && e.message!!.contains("0x80004001"))
+        assertEquals(listOf("MaxAutoExpoTimeAGain", "AutoExpoEnable"), c.lastAutoCalls.map { it.op })
+        assertNull(c.lastAutoSummary!!.result)
+        assertTrue("возврат принят SDK: ${e.message}", e.message!!.contains("SDK принял возврат ручного режима"))
+    }
+
+    /** Отказ запуска AWB: успеха нет, результат не записывается, прежний профиль возвращён. */
+    @Test
+    fun rejectedAwbStartGivesNoResult() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.rejectSetters += "AwbInit"
+        rig.awbResultGain = intArrayOf(64, 0, -64)        // не должен попасть в профиль
+        val previous = CameraProfile.defaultFor(LampType.DAYLIGHT)
+        val e = failureOf { c.autoWhiteBalance(previous) }
+        assertTrue(e.message, e.message!!.contains("AwbInit(one-push)") && e.message!!.contains("0x80004001"))
         val awb = c.lastAutoCalls.single()
         assertEquals("AwbInit", awb.op)
         assertFalse(awb.ok)
-        assertEquals("0x80004001", awb.hr)
+        assertNull(c.lastAutoSummary!!.result)
+        assertEquals("применён прежний профиль", previous.wbRedGain, c.activeProfile.wbRedGain, 0f)
+    }
+
+    /** Отказ чтения результата AE: заглушка JNI не становится профилем, AE не «замораживается» как успех. */
+    @Test
+    fun failedExposureReadIsNotAResult() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.failReads["ExpoTime"] = 0x80004001.toInt()
+        val e = failureOf { c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        assertTrue(e.message, e.message!!.contains("get_ExpoTime") && e.message!!.contains("0x80004001"))
+        assertEquals(listOf("MaxAutoExpoTimeAGain", "AutoExpoEnable", "get_ExpoTime"), c.lastAutoCalls.map { it.op })
+        assertNull(c.lastAutoSummary!!.result)
+        assertTrue("ручной режим возвращён: ${rig.snapshot()}", rig.snapshot().lastIndexOf("ae01") > rig.indexOf("ae11"))
+    }
+
+    @Test
+    fun failedWbReadIsNotAResult() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.failReads["WhiteBalanceGain"] = 0x80004001.toInt()
+        val e = failureOf { c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        assertTrue(e.message, e.message!!.contains("get_WhiteBalanceGain") && e.message!!.contains("0x80004001"))
+        assertNull(c.lastAutoSummary!!.result)
+    }
+
+    /**
+     * Успешное чтение — результат, даже если повторная запись WB отклонена (как E_NOTIMPL на стенде):
+     * значения взяты из чтения ДО сеттеров, отказ записи — предупреждение применения (R14).
+     */
+    @Test
+    fun awbResultComesFromReadBeforeRewrite() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.awbResultGain = intArrayOf(64, 0, -64)
+        rig.rejectSetters += "WhiteBalanceGain"
+        rig.failReads["WhiteBalanceGain"] = 0                 // чтение работает, запись — нет
+        val r = c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        assertEquals(2f, r.wbRedGain, 1e-6f)
+        assertEquals(0.5f, r.wbBlueGain, 1e-6f)
+        assertEquals("0x80004001", c.applyWarning.value!!.rejected["WhiteBalanceGain"])
+    }
+
+    /** Нулевые усиления WB при успешном чтении — допустимый результат (множители 1.0). */
+    @Test
+    fun zeroWbFromSuccessfulReadIsAccepted() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.awbResultGain = intArrayOf(0, 0, 0)
+        val r = c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT).copy(wbRedGain = 1.7f, wbBlueGain = 0.6f))
+        assertEquals(1f, r.wbRedGain, 0f)
+        assertEquals(1f, r.wbBlueGain, 0f)
+        assertEquals("завершена", c.lastAutoSummary!!.outcome)
+    }
+
+    /**
+     * AwbInit и чтение WB успешны, но SDK отклонил выключение AE при завершающем применении профиля:
+     * ручной режим не подтверждён — успешного результата нет, исход возврата показан явно.
+     */
+    @Test
+    fun rejectedAeOffInFinalAwbApplyGivesNoResult() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.awbResultGain = intArrayOf(64, 0, -64)           // не должен попасть в профиль
+        rig.rejectSetters += "AutoExpoEnable(0)"
+        val previous = CameraProfile.defaultFor(LampType.DAYLIGHT)
+        val e = failureOf { c.autoWhiteBalance(previous) }
+        assertTrue(e.message, e.message!!.contains("AutoExpoEnable(0, применение профиля)") && e.message!!.contains("0x80004001"))
+        assertTrue(e.message, e.message!!.contains("После прерывания: ручной режим не подтверждён"))
+        assertFalse(e.message, e.message!!.contains("SDK принял возврат"))
+        assertEquals(listOf("AwbInit", "get_WhiteBalanceGain", "AutoExpoEnable"), c.lastAutoCalls.map { it.op })
+        assertEquals(listOf(true, true, false), c.lastAutoCalls.map { it.ok })
+        val s = c.lastAutoSummary!!
+        assertNull(s.result)
+        assertTrue(s.outcome, s.outcome.startsWith("ошибка"))
+        assertTrue(s.describe(), s.describe().contains("возврат: ручной режим не подтверждён"))
+        assertEquals("профиль не заменён", previous.wbRedGain, c.activeProfile.wbRedGain, 0f)
+    }
+
+    /** Отказ возврата ручного режима отражён явно — в сообщении и итоге, без «восстановлен». */
+    @Test
+    fun rejectedManualRestoreIsReported() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        rig.rejectSetters += "AwbInit"
+        rig.rejectSetters += "AutoExpoEnable"
+        val e = failureOf { c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        assertTrue(e.message, e.message!!.contains("ручной режим не подтверждён") && e.message!!.contains("AutoExpoEnable(0)"))
+        assertFalse(e.message, e.message!!.contains("SDK принял возврат"))
+        assertTrue(c.lastAutoSummary!!.restore!!.contains("ручной режим не подтверждён"))
+        assertTrue(c.lastAutoSummary!!.describe().contains("возврат: ручной режим не подтверждён"))
+    }
+
+    /** Отмена — CancellationException (не ошибка процедуры и не успех); ручной режим возвращается. */
+    @Test
+    fun cancelledProcedureStaysCancellation() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        val ae = async(Dispatchers.IO) { c.autoExposure(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
+        while (!rig.has("ae11")) kotlinx.coroutines.delay(5)
+        ae.cancel()
+        val thrown = runCatching { ae.await() }.exceptionOrNull()
+        assertTrue("$thrown", thrown is kotlinx.coroutines.CancellationException)
+        assertEquals("отменена", c.lastAutoSummary!!.outcome)
+        assertTrue(c.lastAutoSummary!!.restore!!.contains("SDK принял возврат"))
     }
 
     /** 5k: итог AE — вызовы, значения профиля, состояние SDK после, события за время процедуры. */
@@ -851,7 +1039,7 @@ class ToupcamControllerTest {
         val s = c.lastAutoSummary!!
         assertEquals("Автоэкспозиция", s.procedure)
         assertEquals("завершена", s.outcome)
-        assertEquals(listOf("MaxAutoExpoTimeAGain", "AutoExpoEnable", "AutoExpoEnable"), s.calls.map { it.op })
+        assertEquals(listOf("MaxAutoExpoTimeAGain", "AutoExpoEnable", "get_ExpoTime", "get_ExpoAGain", "AutoExpoEnable"), s.calls.map { it.op })
         assertEquals(1000L, s.result!!.exposureUs)
         assertEquals(100, s.result!!.gainPercent)
         assertTrue("состояние SDK прочитано после процедуры", s.readbackAfter != null)
@@ -870,8 +1058,10 @@ class ToupcamControllerTest {
         c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT))
         val s = c.lastAutoSummary!!
         assertEquals("Автобаланс белого", s.procedure)
-        assertEquals(listOf("AwbInit"), s.calls.map { it.op })
-        assertEquals(1f, s.result!!.wbRed, 0f)           // getWhiteBalanceGain = 0 → множитель 1
+        assertEquals(listOf("AwbInit", "get_WhiteBalanceGain"), s.calls.map { it.op })
+        assertEquals(1f, s.result!!.wbRed, 0f)           // прочитано 0 → множитель 1
+        // 5l: неподдерживаемое диагностическое чтение Temp/Tint процедуру не ломает.
+        assertEquals("завершена", s.outcome)
         assertEquals(listOf("WBGAIN"), s.events.map { it.name })
         // 5l: коды новых чтений — в состоянии SDK после процедуры и в строке журнала сводки.
         assertEquals("0x80004001", s.readbackAfter!!.readHresults!!["tempTint"])
@@ -904,15 +1094,19 @@ class ToupcamControllerTest {
         assertTrue(s.readbackAfter != null)
     }
 
-    /** Сбой чтения после процедуры — «неизвестно», а не ноль; процедура не ломается. */
+    /**
+     * SDK не отвечает на чтение состояния: результат AWB прочитать нельзя — процедура не успешна;
+     * состояние после — «неизвестно», а не ноль.
+     */
     @Test
     fun unreadableStateAfterProcedureIsUnknown() = runBlocking {
         val c = controller()
         c.open(LampType.DAYLIGHT)
         rig.failReadState = true
-        c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT))
+        failureOf { c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT)) }
         val s = c.lastAutoSummary!!
-        assertEquals("завершена", s.outcome)
+        assertTrue(s.outcome, s.outcome.startsWith("ошибка"))
+        assertNull(s.result)
         assertEquals(null, s.readbackAfter)
         assertTrue(s.describe().contains("состояние SDK после: неизвестно"))
     }
