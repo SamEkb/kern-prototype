@@ -67,6 +67,9 @@ class CaptureViewModel @Inject constructor(
     /** Отказы SDK при применении профиля — предупреждение (съёмка не блокируется). */
     val applyWarning: StateFlow<com.siams.kern_prototype.camera.ApplyWarning?> = controller.applyWarning
 
+    /** Способ открытия WB текущего подключения — для предупреждения о резервном режиме. */
+    val wbOpenMethod: StateFlow<com.siams.kern_prototype.camera.WbOpenMethod?> = controller.wbOpenMethod
+
     val table: StateFlow<TableWithLayers?> = _tableId
         .flatMapLatest { id -> if (id == null) flowOf(null) else repository.observeTable(id) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)

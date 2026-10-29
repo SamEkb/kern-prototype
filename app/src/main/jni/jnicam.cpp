@@ -15,6 +15,7 @@
 #include <android/log.h>
 #include <android/bitmap.h>
 #include "toupcam.h"
+#include "wb_open.h"
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "JNI_CAM", __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "JNI_CAM", __VA_ARGS__)
@@ -39,6 +40,8 @@ static int       gMaxStillBytes = 0;
 static int       gMaxPreviewBytes = 0;
 static bool      gPreviewCapacityOk = false;
 static bool      gStillCapacityOk = false;
+// Способ открытия WB текущего хэндла (WbOpenMethod из wb_open.h); сбрасывается при каждом открытии.
+static int       gWbOpenMethod = WB_OPEN_NONE;
 
 static int rgb24Bytes(int w, int h) { return ((w * 24 + 31) & ~31) / 8 * h; }
 
@@ -215,8 +218,17 @@ JNIEXPORT jint JNICALL Java_com_droid_usbcam_CamLib_openDevice(JNIEnv *env, jobj
         gHcam = nullptr;
     }
     char camId[128] = {0};
+    // The SDK defaults to Temp/Tint. Our profile applier and AWB use
+    // WhiteBalanceGain / AwbInit, which require RGB Gain mode selected at open.
+    // SDK documentation: doc/en.html sections "White Balance" and "Toupcam_Open".
+    // ";wb=rgb" with the Android "fd-…" id is unverified: NULL → one retry without it (wb_open.h).
     snprintf(camId, sizeof(camId), "fd-%d-%04x-%04x", fd, vendorId, productId);
-    gHcam = Toupcam_Open(camId);
+    LOGI("openDevice: requesting white balance mode RGB Gain (wb=rgb)");
+    gHcam = openWithWbRgb(camId,
+                          [](const char *id) { return Toupcam_Open(id); },
+                          [](const char *msg) { LOGE("openDevice: %s", msg); },
+                          &gWbOpenMethod);
+    LOGI("openDevice: white balance open method %d (1 = wb=rgb, 2 = fallback without suffix)", gWbOpenMethod);
     if (!gHcam) {
         LOGE("%s: Toupcam_Open failed", __FUNCTION__);
         return JNI_ERR;
@@ -465,6 +477,11 @@ JNIEXPORT jstring JNICALL Java_com_droid_usbcam_CamLib_describe(JNIEnv *env, job
     return env->NewStringUTF(out.c_str());
 }
 
+// Способ открытия WB (WbOpenMethod): с каким параметром открыт хэндл, а не работа баланса белого.
+JNIEXPORT jint JNICALL Java_com_droid_usbcam_CamLib_getWbOpenMethod(JNIEnv *env, jobject obj) {
+    return gHcam ? gWbOpenMethod : WB_OPEN_NONE;
+}
+
 JNIEXPORT jboolean JNICALL Java_com_droid_usbcam_CamLib_isAlive(JNIEnv *env, jobject obj) {
     return (gHcam != nullptr);
 }
@@ -473,6 +490,7 @@ JNIEXPORT void JNICALL Java_com_droid_usbcam_CamLib_releaseCamera(JNIEnv *env, j
     gSnapSupported = false;
     gPreviewCapacityOk = false;
     gStillCapacityOk = false;
+    gWbOpenMethod = WB_OPEN_NONE;
     if (gHcam) {
         Toupcam_Close(gHcam);
         gHcam = nullptr;

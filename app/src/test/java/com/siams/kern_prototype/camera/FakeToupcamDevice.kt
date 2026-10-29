@@ -60,6 +60,8 @@ internal class FakeCameraRig {
     @Volatile var frameIntervalMs = 20L
     /** Выдержка, с которой камера уже работает при открытии (до применения профиля). */
     @Volatile var initialExpoUs = 0
+    /** Способ открытия WB, который «сообщает JNI» при следующих открытиях (код [WbOpenMethod]). */
+    @Volatile var wbOpenMethod = WbOpenMethod.RGB_SUFFIX.code
     /** Записывать отправку каждого кадра в журнал («frame<id>»). */
     @Volatile var logFrames = false
 
@@ -109,6 +111,7 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
         rig.openGate?.await(5, TimeUnit.SECONDS)
         rig.openDevice?.let { rig.violations += "open$id при открытом $it" }
         rig.openDevice = id
+        openedWbMethod = rig.wbOpenMethod
         this.listener = listener
         originalListener = listener
         rig.log += "open$id"
@@ -223,6 +226,10 @@ internal class FakeToupcamDevice(private val rig: FakeCameraRig, val id: String)
         )
     }
     override fun describe() = "sdk=fake\nmodel=FAKE$id"
+
+    /** Способ открытия фиксируется при открытии этого устройства (как глобальный признак JNI). */
+    @Volatile private var openedWbMethod = 0
+    override fun wbOpenMethod(): Int = handle("wbOpenMethod") { openedWbMethod }
 
     private companion object {
         const val E_NOTIMPL = 0x80004001.toInt()

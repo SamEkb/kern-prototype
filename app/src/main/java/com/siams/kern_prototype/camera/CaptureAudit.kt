@@ -22,6 +22,8 @@ data class CaptureAudit(
     val memory: MemoryTrace? = null,
     /** R21: замер памяти сохранения слоя (проверка JPEG, SHA-256, миниатюра). */
     val saveMemory: MemoryTrace? = null,
+    /** Способ открытия WB подключения, на котором сделан снимок ([WbOpenMethod]); null — не известен. */
+    val wbOpenMethod: WbOpenMethod? = null,
     val note: String = "readback — состояние SDK около снимка, не доказанные параметры кадра",
 ) {
     /** Запрос в единицах профиля. */

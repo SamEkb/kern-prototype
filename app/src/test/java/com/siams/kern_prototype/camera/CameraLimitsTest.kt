@@ -95,5 +95,6 @@ class CameraLimitsTest {
         override fun getWhiteBalanceGain() = intArrayOf(0, 0, 0)
         override fun readState() = IntArray(26)
         override fun describe() = ""
+        override fun wbOpenMethod() = WbOpenMethod.RGB_SUFFIX.code
     }
 }

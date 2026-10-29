@@ -50,6 +50,12 @@ interface KernCamera {
      */
     val applyWarning: StateFlow<ApplyWarning?> get() = NO_APPLY_WARNING
 
+    /**
+     * Способ открытия WB текущего подключения Touptek ([WbOpenMethod]); null — камера не открыта
+     * или выбор режима WB при открытии не применяется (Camera2). Не доказывает работу баланса белого.
+     */
+    val wbOpenMethod: StateFlow<WbOpenMethod?> get() = NO_WB_OPEN_METHOD
+
     /** FIXES §3: возможности камеры для интерфейса. По умолчанию — без фокуса. */
     val capabilities: CameraCapabilities get() = CameraCapabilities()
 
@@ -125,3 +131,5 @@ data class FfcReference(val path: String, val quality: FfcQuality.Report)
 data class ApplyWarning(val lampType: LampType, val rejected: Map<String, String>)
 
 private val NO_APPLY_WARNING: StateFlow<ApplyWarning?> = kotlinx.coroutines.flow.MutableStateFlow(null)
+
+private val NO_WB_OPEN_METHOD: StateFlow<WbOpenMethod?> = kotlinx.coroutines.flow.MutableStateFlow(null)

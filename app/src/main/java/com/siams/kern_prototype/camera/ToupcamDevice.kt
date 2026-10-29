@@ -58,4 +58,7 @@ internal interface ToupcamDevice {
 
     /** R14/R17: сведения о модели/прошивке для журнала диагностики. */
     fun describe(): String
+
+    /** Способ открытия WB после [open] — код [WbOpenMethod] (0 — не открыта). */
+    fun wbOpenMethod(): Int
 }

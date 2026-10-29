@@ -1,7 +1,8 @@
 # Подготовка окружения сборки на раннере GitLab: JDK 21 и Android SDK/NDK.
 # Подключается через `source` (экспортирует JAVA_HOME, ANDROID_HOME, PATH).
 #
-# Раннер ничего заранее не обязан иметь, кроме bash, curl, unzip, tar и flock: недостающее
+# Раннер ничего заранее не обязан иметь, кроме bash, curl, unzip, tar, flock и компилятора C++
+# хоста (c++ или переменная CXX — для :app:hostNativeTest; не скачивается): недостающее
 # скачивается один раз в кеш KERN_CI_HOME (по умолчанию ~/.cache/kern-ci) и дальше
 # переиспользуется. Параллельные задачи ставят пакеты под общим замком.
 # Версии — те же, что в app/build.gradle.kts и gradle/gradle-daemon-jvm.properties.
@@ -28,6 +29,10 @@ kern_setup() {
     for tool in curl unzip tar flock; do
         command -v "$tool" >/dev/null || kern_fail "на раннере нет '$tool'" || return 1
     done
+    # Нативный тест обязателен: без компилятора задача падает сразу, а не на шаге hostNativeTest.
+    command -v "${CXX:-c++}" >/dev/null ||
+        kern_fail "на раннере нет компилятора C++ хоста '${CXX:-c++}' (нужен :app:hostNativeTest): установите g++ или clang++ либо задайте CXX" ||
+        return 1
     mkdir -p "$KERN_CI_HOME" || return 1
 
     exec 9>"$KERN_CI_HOME/.lock"

@@ -58,6 +58,7 @@ import com.siams.kern_prototype.ui.components.rememberMovableCameraPreview
 import com.siams.kern_prototype.ui.components.CameraScreenLayout
 import com.siams.kern_prototype.ui.components.LampSwitch
 import com.siams.kern_prototype.ui.components.applyWarningText
+import com.siams.kern_prototype.ui.components.wbOpenWarningText
 import com.siams.kern_prototype.ui.theme.Blue
 import com.siams.kern_prototype.ui.theme.Blue40
 import com.siams.kern_prototype.ui.theme.Body2Bold
@@ -106,6 +107,7 @@ fun CameraProfilesScreen(
     val showFfcRemove by vm.showFfcRemove.collectAsStateWithLifecycle()
     val cameraState by vm.cameraState.collectAsStateWithLifecycle()
     val applyWarning by vm.applyWarning.collectAsStateWithLifecycle()
+    val wbOpenMethod by vm.wbOpenMethod.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     val dirty by vm.dirty.collectAsStateWithLifecycle()
     val exitPrompt by vm.exitPrompt.collectAsStateWithLifecycle()
@@ -264,6 +266,8 @@ fun CameraProfilesScreen(
 
         // Отказы SDK при применении профиля к текущему подключению — предупреждение, не блокировка.
         applyWarning?.let { Text(applyWarningText(it), style = Body4, color = Orange30) }
+        // Камера открыта без режима RGB Gain: ручной WB и AWB не подтверждены (не блокировка).
+        wbOpenWarningText(wbOpenMethod)?.let { Text(it, style = Body4, color = Orange30) }
         if (!manualSupported) {
             Text(
                 "⚠ Ручной режим (MANUAL_SENSOR) не поддерживается — превью может не меняться (§6.1).",

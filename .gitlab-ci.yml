@@ -25,6 +25,7 @@ check:
     - echo "=== testDebugUnitTest" && ./gradlew :app:testDebugUnitTest $GRADLE_ARGS || failed=1
     - ci/runner-resources.sh
     - echo "=== lintDebug" && ./gradlew :app:lintDebug $GRADLE_ARGS || failed=1
+    - echo "=== hostNativeTest" && ./gradlew :app:hostNativeTest $GRADLE_ARGS || failed=1
     - exit ${failed:-0}
   artifacts:
     when: always

@@ -114,6 +114,9 @@ class CameraProfilesViewModel @Inject constructor(
     /** Отказы SDK при применении профиля — предупреждение. */
     val applyWarning: StateFlow<com.siams.kern_prototype.camera.ApplyWarning?> = controller.applyWarning
 
+    /** Способ открытия WB текущего подключения — для предупреждения о резервном режиме. */
+    val wbOpenMethod: StateFlow<com.siams.kern_prototype.camera.WbOpenMethod?> = controller.wbOpenMethod
+
     /** FIXES §3: возможности активной камеры (для показа параметров). */
     val capabilities: com.siams.kern_prototype.camera.CameraCapabilities get() = controller.capabilities
 

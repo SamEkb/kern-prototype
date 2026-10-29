@@ -120,6 +120,9 @@ public class CamLib {
     /** R14/R17: сведения о модели и прошивке для журнала диагностики («ключ=значение» по строкам). */
     public native String describe();
 
+    /** Способ открытия WB: 1 — с ";wb=rgb", 2 — резервно без суффикса, 0 — не открыта. */
+    public native int getWbOpenMethod();
+
     public native boolean isAlive();
 
     public native void releaseCamera();

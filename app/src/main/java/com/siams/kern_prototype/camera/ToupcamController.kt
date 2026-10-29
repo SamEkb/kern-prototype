@@ -126,6 +126,10 @@ class ToupcamController internal constructor(
     private val _applyWarning = MutableStateFlow<ApplyWarning?>(null)
     override val applyWarning: StateFlow<ApplyWarning?> = _applyWarning.asStateFlow()
 
+    /** Способ открытия WB текущего подключения: сбрасывается при каждом открытии и закрытии. */
+    private val _wbOpenMethod = MutableStateFlow<WbOpenMethod?>(null)
+    override val wbOpenMethod: StateFlow<WbOpenMethod?> = _wbOpenMethod.asStateFlow()
+
     /** Последний подтверждённо применённый профиль — для отображения (HUD, редактор). */
     @Volatile
     private var lastConfirmed: CameraProfile? = null
@@ -193,10 +197,17 @@ class ToupcamController internal constructor(
         }
         generation = stillGate.startConnection() // события начнутся только после open() устройства
         connection = conn
+        _wbOpenMethod.value = null
         try {
             check(!released) { "Камера освобождена" } // release() до записи поля — см. выше
             conn.connect()                             // USB-доступ → открыть → поток кадров
             conn.run { dev ->
+                // Способ открытия WB — только по факту открытия; последующие отказы WB его не меняют
+                // и повторного открытия не вызывают.
+                val wb = WbOpenMethod.fromNative(dev.wbOpenMethod())
+                _wbOpenMethod.value = wb
+                if (wb == WbOpenMethod.RGB_SUFFIX) Log.i(TAG, "Способ открытия WB: $wb (режим RGB Gain запрошен)")
+                else Log.w(TAG, "Способ открытия WB: $wb — режим RGB Gain не выбран, ручной WB и AWB не подтверждены")
                 readSizes(dev)
                 // R14/R17: модель, прошивка, выбранное still-разрешение — в журнал диагностики.
                 runCatching { Log.i(TAG, "Камера:\n" + dev.describe().trim()) }
@@ -696,6 +707,7 @@ class ToupcamController internal constructor(
             applied = ready.report,
             limits = _limits.value,
             readback = readback(conn),
+            wbOpenMethod = _wbOpenMethod.value,
         )
         val still = snapStillBlocking(conn, knownExposureUs(ready.report))
         probe.mark("pulled")
@@ -1034,6 +1046,7 @@ class ToupcamController internal constructor(
             stillGate.fail(IllegalStateException("Камера освобождена"))
             applied = null
             lastKnownExposureUs = null
+            _wbOpenMethod.value = null
             preview = previewBitmap
             connection = null
             previewSurface = null

@@ -140,3 +140,35 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
+
+// Хостовый тест нативной логики открытия камеры (jni/wb_open.h): Toupcam_Open в нём подменён,
+// поэтому проверяется повтор без ";wb=rgb", которого Kotlin-подмена камеры не исполняет.
+// Нужен компилятор C++ хоста: c++ из PATH или переменная CXX. Запуск: ./gradlew :app:hostNativeTest
+val hostNativeTestDir = layout.buildDirectory.dir("hostNativeTest")
+val compileHostNativeTest by tasks.registering(Exec::class) {
+    val source = file("src/test/cpp/wb_open_test.cpp")
+    val binary = hostNativeTestDir.map { it.file("wb_open_test") }
+    inputs.files(source, file("src/main/jni/wb_open.h"))
+    outputs.file(binary)
+    val compiler = providers.environmentVariable("CXX").orElse("c++").get()
+    executable = compiler
+    args(
+        "-std=c++11", "-Wall", "-Wextra", "-Werror",
+        "-I", file("src/main/jni").path,
+        source.path, "-o", binary.get().asFile.path,
+    )
+    doFirst {
+        // Понятная ошибка вместо «не удалось запустить процесс»; тест не пропускается молча.
+        val found = File(compiler).isAbsolute && File(compiler).canExecute() ||
+            System.getenv("PATH").orEmpty().split(File.pathSeparator).any { File(it, compiler).canExecute() }
+        if (!found) throw GradleException(
+            "hostNativeTest: нет компилятора C++ хоста '$compiler'. Установите g++ или clang++ либо задайте CXX.",
+        )
+        hostNativeTestDir.get().asFile.mkdirs()
+    }
+}
+tasks.register<Exec>("hostNativeTest") {
+    description = "Хостовый тест резервного открытия камеры (jni/wb_open.h)."
+    dependsOn(compileHostNativeTest)
+    executable = hostNativeTestDir.get().file("wb_open_test").asFile.path
+}

@@ -743,6 +743,80 @@ class ToupcamControllerTest {
         assertTrue("${capture.awaitWithin().exceptionOrNull()}", capture.awaitWithin().isSuccess)
     }
 
+    /** Открытие с `;wb=rgb`: предупреждения нет, способ — в аудите снимка (это запрос режима, не проверка WB). */
+    @Test
+    fun rgbSuffixOpenHasNoWarningAndIsAudited() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        assertEquals(WbOpenMethod.RGB_SUFFIX, c.wbOpenMethod.value)
+        assertNull(com.siams.kern_prototype.ui.components.wbOpenWarningText(c.wbOpenMethod.value))
+        assertEquals(WbOpenMethod.RGB_SUFFIX, c.capture(target(), LampType.DAYLIGHT).audit!!.wbOpenMethod)
+    }
+
+    /**
+     * Резервное открытие без суффикса видно оператору и в аудите (JSON); признак берётся заново при
+     * каждом открытии: переподключение с `;wb=rgb` снимает предупреждение, закрытие сбрасывает признак.
+     */
+    @Test
+    fun fallbackOpenIsShownAuditedAndResetOnEachOpen() = runBlocking {
+        rig.wbOpenMethod = WbOpenMethod.FALLBACK_NO_SUFFIX.code
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        assertEquals(WbOpenMethod.FALLBACK_NO_SUFFIX, c.wbOpenMethod.value)
+        val text = com.siams.kern_prototype.ui.components.wbOpenWarningText(c.wbOpenMethod.value)!!
+        assertTrue(text, text.contains("резервном режиме") && text.contains("не подтверждены"))
+        val audit = c.capture(target(), LampType.DAYLIGHT).audit!!
+        assertEquals(WbOpenMethod.FALLBACK_NO_SUFFIX, audit.wbOpenMethod)
+        assertTrue(json.encodeToString(CaptureAudit.serializer(), audit).contains("\"wbOpenMethod\":\"FALLBACK_NO_SUFFIX\""))
+
+        rig.wbOpenMethod = WbOpenMethod.RGB_SUFFIX.code
+        c.recover()                                          // подключение 2 — с суффиксом
+        assertTrue(rig.has("open2"))
+        assertEquals(WbOpenMethod.RGB_SUFFIX, c.wbOpenMethod.value)
+        assertEquals(WbOpenMethod.RGB_SUFFIX, c.capture(target(), LampType.DAYLIGHT).audit!!.wbOpenMethod)
+
+        rig.wbOpenMethod = WbOpenMethod.FALLBACK_NO_SUFFIX.code
+        c.recover()                                          // подключение 3 — снова резервное
+        assertEquals(WbOpenMethod.FALLBACK_NO_SUFFIX, c.wbOpenMethod.value)
+        c.release()
+        assertNull("закрытие сбрасывает признак", c.wbOpenMethod.value)
+    }
+
+    /** Неудачное переподключение не оставляет признак прежнего подключения. */
+    @Test
+    fun failedReconnectDoesNotKeepPreviousOpenMethod() = runBlocking {
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        assertEquals(WbOpenMethod.RGB_SUFFIX, c.wbOpenMethod.value)
+        rig.failAccess += "2"
+        assertTrue(runCatching { c.recover() }.isFailure)
+        assertNull(c.wbOpenMethod.value)
+    }
+
+    /** Нераспознанный код JNI — «неизвестен», с предупреждением (не считается запросом RGB Gain). */
+    @Test
+    fun unknownOpenMethodIsWarned() = runBlocking {
+        rig.wbOpenMethod = 0
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        assertEquals(WbOpenMethod.UNKNOWN, c.wbOpenMethod.value)
+        assertTrue(com.siams.kern_prototype.ui.components.wbOpenWarningText(c.wbOpenMethod.value) != null)
+    }
+
+    /** Отказы WB после открытия не меняют способ открытия и не вызывают повторного открытия. */
+    @Test
+    fun wbRejectionsNeitherReopenNorChangeOpenMethod() = runBlocking {
+        rig.rejectSetters += "WhiteBalanceGain"
+        rig.rejectSetters += "AwbInit"
+        val c = controller()
+        c.open(LampType.DAYLIGHT)
+        assertEquals("0x80004001", c.applyWarning.value!!.rejected["WhiteBalanceGain"])
+        assertTrue(runCatching { c.autoWhiteBalance(CameraProfile.defaultFor(LampType.DAYLIGHT)) }.isFailure)
+        c.capture(target(), LampType.DAYLIGHT)
+        assertEquals(WbOpenMethod.RGB_SUFFIX, c.wbOpenMethod.value)
+        assertEquals("одно открытие", 1, rig.snapshot().count { it.startsWith("openStart") })
+    }
+
     @Test
     fun failedFirstOpenCanBeRecovered() = runBlocking {
         rig.failAccess += "1"

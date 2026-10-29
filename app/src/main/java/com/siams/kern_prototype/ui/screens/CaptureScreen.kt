@@ -51,6 +51,7 @@ import com.siams.kern_prototype.ui.components.rememberMovableCameraPreview
 import com.siams.kern_prototype.ui.components.CameraScreenLayout
 import com.siams.kern_prototype.ui.components.LampSwitch
 import com.siams.kern_prototype.ui.components.applyWarningText
+import com.siams.kern_prototype.ui.components.wbOpenWarningText
 import com.siams.kern_prototype.ui.theme.Body2Bold
 import com.siams.kern_prototype.ui.theme.Body3
 import com.siams.kern_prototype.ui.theme.Body4
@@ -89,6 +90,7 @@ fun CaptureScreen(
     val profile by vm.activeProfile.collectAsStateWithLifecycle()
     val cameraState by vm.cameraState.collectAsStateWithLifecycle()
     val applyWarning by vm.applyWarning.collectAsStateWithLifecycle()
+    val wbOpenMethod by vm.wbOpenMethod.collectAsStateWithLifecycle()
     val currentLampOnServer by vm.currentLampOnServer.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     // Системный «Назад» во время снимка не закрывает экран (кадр не должен потеряться).
@@ -115,6 +117,8 @@ fun CaptureScreen(
         Text(profileLine(profile, vm.controller.capabilities), style = Body4, color = Color.White.copy(alpha = 0.85f))
         // Отказы SDK при применении профиля к текущему подключению — предупреждение, не блокировка.
         applyWarning?.let { Text(applyWarningText(it), style = Body4, color = Orange30) }
+        // Камера открыта без режима RGB Gain: ручной WB и AWB не подтверждены (не блокировка).
+        wbOpenWarningText(wbOpenMethod)?.let { Text(it, style = Body4, color = Orange30) }
         // R04: пересъёмка уже отправленного снимка не заменит его на сервере.
         if (currentLampOnServer) Text(stringResource(R.string.capture_reshoot_sent_hint), style = Body4, color = Orange30)
         if (!manualSupported) {

@@ -67,7 +67,7 @@ XML не затираются следующим запуском.
 
 ```bash
 review_run_dir=$(mktemp -d /tmp/kern-check.XXXXXX)
-./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug \
+./gradlew :app:testDebugUnitTest :app:hostNativeTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug \
   --rerun-tasks --console=plain > "$review_run_dir/gradle.log" 2>&1
 review_exit=$?
 cp -R app/build/test-results "$review_run_dir/" 2>/dev/null || true
@@ -83,6 +83,11 @@ printf 'Gradle exit=%s; reports=%s\n' "$review_exit" "$review_run_dir"
 mtime позволяло инкрементальной сборке оставить мутированный класс.
 Пойманная мутация — компилируемый вариант, на котором падает ожидаемый тест;
 ошибка компиляции или старый XML этого не доказывают.
+
+`hostNativeTest` собирает компилятором C++ хоста (`c++` или `CXX`) тест `app/src/test/cpp`:
+логику открытия камеры из `jni/wb_open.h` с подменённым `Toupcam_Open`. Это не проверка SDK.
+Без компилятора задача падает с понятной ошибкой; на раннере CI его наличие проверяет
+`ci/setup-android.sh` до сборки. Тест не пропускается молча.
 
 ## Где какие проверки
 
